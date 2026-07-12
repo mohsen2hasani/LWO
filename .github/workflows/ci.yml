@@ -5,6 +5,7 @@ on:
   push:
     branches: [ main ]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   rust:
@@ -34,6 +35,9 @@ jobs:
     name: OpenWrt package (${{ matrix.arch }})
     runs-on: ubuntu-latest
     needs: rust
+    # Skip the ~2h SDK build on plain pushes to main (releases build via
+    # publish.yml on a tag). Still runs on pull requests and manual dispatch.
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
