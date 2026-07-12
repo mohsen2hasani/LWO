@@ -23,7 +23,7 @@ and upgrade them from OpenWrt's **System → Software** panel (or `apk`) instead
 wget -O /etc/apk/keys/lwo-feed.pem https://mohsen2hasani.github.io/LWO/public-key.pem
 
 # 2. add the feed
-echo 'https://mohsen2hasani.github.io/LWO/arm_cortex-a7_neon-vfpv4' > /etc/apk/repositories.d/lwo.list
+echo 'https://mohsen2hasani.github.io/LWO/arm_cortex-a7_neon-vfpv4/packages.adb' > /etc/apk/repositories.d/lwo.list
 
 # 3. refresh and install
 apk update

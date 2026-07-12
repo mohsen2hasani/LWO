@@ -43,7 +43,7 @@ auto-upgradable from **System → Software**:
 ```sh
 # trust the feed's signing key, then add the feed
 wget -O /etc/apk/keys/lwo-feed.pem https://mohsen2hasani.github.io/LWO/public-key.pem
-echo 'https://mohsen2hasani.github.io/LWO/arm_cortex-a7_neon-vfpv4' > /etc/apk/repositories.d/lwo.list
+echo 'https://mohsen2hasani.github.io/LWO/arm_cortex-a7_neon-vfpv4/packages.adb' > /etc/apk/repositories.d/lwo.list
 apk update
 apk add lwo-proxy luci-app-mullvad-lwo
 ```
