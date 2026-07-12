@@ -35,12 +35,29 @@ kernel WireGuard <--(loopback)-- lwo-proxy <--deobfuscate-- WAN <-- Mullvad serv
 | `lwo-proxy` | daemon + `lwo-switch` / `lwo-failover` helpers, UCI config (`/etc/config/lwo`), procd init, hotplug |
 | `luci-app-mullvad-lwo` | LuCI Status / Configuration / Logs pages + relay-switching UI |
 
-## Using it
+## Install
 
-**Install** — either build the two packages and copy them over
-([`docs/INSTALL.md`](docs/INSTALL.md)), or add the signed apk feed and install from
-**System → Software** ([`docs/FEED.md`](docs/FEED.md)). The procd services are auto-enabled on
-install, so there's no `service … enable` step.
+**From the apk feed (recommended)** — one-time setup on the router, then it's installable and
+auto-upgradable from **System → Software**:
+
+```sh
+# trust the feed's signing key, then add the feed
+wget -O /etc/apk/keys/lwo-feed.pem https://mohsen2hasani.github.io/LWO/public-key.pem
+echo 'https://mohsen2hasani.github.io/LWO/arm_cortex-a7_neon-vfpv4' > /etc/apk/repositories.d/lwo.list
+apk update
+apk add lwo-proxy luci-app-mullvad-lwo
+```
+
+The feed targets **`arm_cortex-a7_neon-vfpv4`** (Google Wifi AC-1304 / OpenWrt 25.12); for
+other targets, build the packages yourself. Details and how the feed is published:
+[`docs/FEED.md`](docs/FEED.md).
+
+**Or build them yourself** — via the OpenWrt SDK or the CI artifacts:
+[`docs/INSTALL.md`](docs/INSTALL.md).
+
+Either way, the procd services are auto-enabled on install — no `service … enable` step.
+
+## Using it
 
 **Configure & operate — all in LuCI** (`Services → Mullvad LWO`):
 - **Status** — running / connected, endpoint, latest handshake, bytes in/out.
