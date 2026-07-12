@@ -1,0 +1,29 @@
+[package]
+name = "lwo-proxy"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-3.0-or-later"
+description = "Standalone Mullvad LWO (Lightweight WireGuard Obfuscation) transport proxy for OpenWrt"
+repository = "https://github.com/mohsen2hasani/LWO"
+readme = "../README.md"
+
+# The daemon is deliberately tiny: tokio + rand (+ nix on Linux for fwmark).
+# The obfuscation protocol itself is vendored verbatim in src/lwo_core.rs
+# from mullvad/mullvadvpn-app (GPL-3.0). See docs/01-research-mullvad-lwo.md.
+[dependencies]
+log = "0.4"
+rand = "0.9"
+tokio = { version = "1", features = ["rt", "net", "io-util", "macros", "signal", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Only used to set SO_MARK (fwmark) on the outbound socket so it bypasses the
+# VPN routing table. Matches Mullvad's tunnel-obfuscation/src/socket.rs.
+nix = { version = "0.29", features = ["socket"] }
+
+[profile.release]
+opt-level = "s"      # optimize for size — the router overlay is ~73 MB
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

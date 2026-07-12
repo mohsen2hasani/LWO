@@ -1,0 +1,17 @@
+{
+	"luci-app-mullvad-lwo": {
+		"description": "Grant access to Mullvad LWO status and configuration",
+		"read": {
+			"ubus": {
+				"luci.lwo": [ "status", "logs" ]
+			},
+			"uci": [ "lwo" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.lwo": [ "start", "stop", "restart", "switch", "next", "failover" ]
+			},
+			"uci": [ "lwo" ]
+		}
+	}
+}

@@ -1,0 +1,23 @@
+{
+	"admin/services/lwo": {
+		"title": "Mullvad LWO",
+		"order": 60,
+		"action": { "type": "firstchild" },
+		"depends": { "acl": [ "luci-app-mullvad-lwo" ] }
+	},
+	"admin/services/lwo/status": {
+		"title": "Status",
+		"order": 10,
+		"action": { "type": "view", "path": "lwo/status" }
+	},
+	"admin/services/lwo/config": {
+		"title": "Configuration",
+		"order": 20,
+		"action": { "type": "view", "path": "lwo/config" }
+	},
+	"admin/services/lwo/logs": {
+		"title": "Logs",
+		"order": 30,
+		"action": { "type": "view", "path": "lwo/logs" }
+	}
+}

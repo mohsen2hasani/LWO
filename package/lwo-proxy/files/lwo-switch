@@ -1,0 +1,126 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# lwo-switch: switch/failover the LWO tunnel across a list of Mullvad relays.
+#
+# Relays live as a UCI list in /etc/config/lwo, one entry per relay:
+#     list peer 'ENDPOINT_IP PUBLIC_KEY [PORT]'
+# PORT is optional and defaults to lwo.main.server_port (Mullvad LWO uses the
+# same port across relays, so usually you only need "IP KEY").
+#
+# A switch updates the lwo proxy (server/pubkey/port) AND the kernel WireGuard
+# peer key + relay bypass route, restarts both, and checks for a handshake.
+
+. /lib/functions.sh
+
+config_load lwo
+config_get WG_IFACE main wg_interface  wg_mullvad
+config_get WG_PEER  main wg_peer       wgpeer_mullvad
+config_get BYPASS   main bypass_route  lwo_bypass
+config_get HS_MAX   main handshake_max 180
+config_get DEF_PORT main server_port   51820
+config_get ACTIVE   main active        ""
+
+msg() { echo "$@" >&2; }
+
+PEERS=""
+_collect() { PEERS="${PEERS}$1
+"; }
+config_list_foreach main peer _collect
+
+peer_ips() { printf '%s\n' "$PEERS" | while read -r ip key port; do [ -n "$ip" ] && echo "$ip"; done; }
+
+find_peer() { # -> "ip key port" for the given IP
+	printf '%s\n' "$PEERS" | while read -r ip key port; do
+		[ "$ip" = "$1" ] && { echo "$ip $key ${port:-$DEF_PORT}"; return; }
+	done
+}
+
+handshake_age() {
+	local now hs
+	now="$(date +%s)"
+	hs="$(wg show "$WG_IFACE" latest-handshakes 2>/dev/null | awk 'NR==1{print $2}')"
+	if [ -n "$hs" ] && [ "$hs" -gt 0 ] 2>/dev/null; then echo $((now - hs)); else echo 99999; fi
+}
+
+apply() { # ip key port
+	msg "switching to $1:$3"
+	uci set lwo.main.server="$1"
+	uci set lwo.main.server_pubkey="$2"
+	uci set lwo.main.server_port="$3"
+	uci set lwo.main.active="$1"
+	uci commit lwo
+	uci set network.$WG_PEER.public_key="$2"
+	uci set network.$BYPASS.target="$1/32"
+	uci commit network
+	ifup "$WG_IFACE"
+	/etc/init.d/lwo restart
+}
+
+verify() {
+	local i=0 age
+	while [ $i -lt "${1:-15}" ]; do
+		age="$(handshake_age)"
+		[ "$age" -lt "$HS_MAX" ] && { msg "OK: handshake ${age}s ago"; return 0; }
+		i=$((i + 1)); sleep 1
+	done
+	msg "no handshake within ${HS_MAX}s"
+	return 1
+}
+
+use_ip() {
+	local rec; rec="$(find_peer "$1")"
+	[ -n "$rec" ] || { msg "no relay with IP '$1' in lwo.main.peer"; return 1; }
+	apply $rec && verify
+}
+
+next_ip() {
+	local ips pick="" first="" take=0
+	ips="$(peer_ips)"
+	[ -n "$ips" ] || { msg "no relays defined"; return 1; }
+	for ip in $ips; do
+		[ -z "$first" ] && first="$ip"
+		[ "$take" = 1 ] && { pick="$ip"; break; }
+		[ "$ip" = "$ACTIVE" ] && take=1
+	done
+	[ -n "$pick" ] || pick="$first"
+	use_ip "$pick"
+}
+
+failover() {
+	local age; age="$(handshake_age)"
+	[ "$age" -lt "$HS_MAX" ] && { msg "healthy (${age}s ago); no action"; return 0; }
+	msg "tunnel stale (${age}s ago); trying relays in order..."
+	for ip in $(peer_ips); do
+		apply $(find_peer "$ip") && verify && { msg "failed over to $ip"; return 0; }
+	done
+	msg "all relays failed"; return 1
+}
+
+list_peers() {
+	local age mark; age="$(handshake_age)"
+	msg "active=$ACTIVE  handshake=${age}s ago  (down if > ${HS_MAX}s)"
+	printf '%s\n' "$PEERS" | while read -r ip key port; do
+		[ -n "$ip" ] || continue
+		mark=" "; [ "$ip" = "$ACTIVE" ] && mark="*"
+		printf "%s %-16s port=%-6s %s\n" "$mark" "$ip" "${port:-$DEF_PORT}" "$key"
+	done
+}
+
+case "${1:-list}" in
+	list)     list_peers ;;
+	use)      use_ip "$2" ;;
+	next)     next_ip ;;
+	check)    age="$(handshake_age)"; msg "handshake ${age}s ago"; [ "$age" -lt "$HS_MAX" ] ;;
+	failover) failover ;;
+	watch)
+		# Background scheduler used by /etc/init.d/lwo-failover: sleep first (so a
+		# restart never busy-loops), then run one failover check, forever.
+		interval="$(uci -q get lwo.main.failover_interval 2>/dev/null)"
+		[ -n "$interval" ] || interval=120
+		while :; do
+			sleep "$interval"
+			"$0" failover
+		done
+		;;
+	*) msg "usage: lwo-switch {list | use <ip> | next | check | failover | watch}"; exit 2 ;;
+esac

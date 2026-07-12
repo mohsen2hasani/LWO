@@ -1,0 +1,97 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-3.0-or-later
+# procd init script for the Mullvad LWO proxy.
+
+USE_PROCD=1
+START=90
+STOP=10
+
+PROG=/usr/sbin/lwo-proxy
+
+# Priority of the ip rule that steers fwmark'd (obfuscated) traffic to the main
+# table so it bypasses any VPN/pbr rule. Small number = high priority.
+LWO_RULE_PREF=1000
+
+validate_lwo_section() {
+	uci_validate_section lwo lwo "${1}" \
+		'enabled:bool:0' \
+		'interface:string' \
+		'listen_port:port:51820' \
+		'server:host' \
+		'server_port:port:51820' \
+		'server_pubkey:string' \
+		'client_pubkey:string' \
+		'fwmark:string' \
+		'auto_reconnect:bool:1' \
+		'reconnect_delay:uinteger:3' \
+		'log_level:string:info'
+}
+
+add_fwmark_rule() {
+	local mark="$1"
+	[ -n "$mark" ] || return 0
+	# Idempotent: remove a stale copy first.
+	ip rule del fwmark "$mark" lookup main pref "$LWO_RULE_PREF" 2>/dev/null
+	ip -6 rule del fwmark "$mark" lookup main pref "$LWO_RULE_PREF" 2>/dev/null
+	ip rule add fwmark "$mark" lookup main pref "$LWO_RULE_PREF" 2>/dev/null
+	ip -6 rule add fwmark "$mark" lookup main pref "$LWO_RULE_PREF" 2>/dev/null
+}
+
+del_fwmark_rule() {
+	local mark="$1"
+	[ -n "$mark" ] || return 0
+	ip rule del fwmark "$mark" lookup main pref "$LWO_RULE_PREF" 2>/dev/null
+	ip -6 rule del fwmark "$mark" lookup main pref "$LWO_RULE_PREF" 2>/dev/null
+}
+
+start_service() {
+	config_load lwo
+	validate_lwo_section main || {
+		logger -t lwo "invalid configuration in /etc/config/lwo"
+		return 1
+	}
+
+	[ "$enabled" = "1" ] || {
+		logger -t lwo "LWO is disabled in /etc/config/lwo"
+		return 0
+	}
+
+	if [ -z "$server" ] || [ -z "$server_pubkey" ] || [ -z "$client_pubkey" ]; then
+		logger -t lwo "missing required server / server_pubkey / client_pubkey"
+		return 1
+	fi
+
+	add_fwmark_rule "$fwmark"
+
+	procd_open_instance
+	procd_set_param command "$PROG" \
+		--listen "127.0.0.1:${listen_port}" \
+		--server "${server}:${server_port}" \
+		--server-pubkey "$server_pubkey" \
+		--client-pubkey "$client_pubkey" \
+		--reconnect-delay "$reconnect_delay" \
+		--log-level "$log_level"
+	[ -n "$fwmark" ] && procd_append_param command --fwmark "$fwmark"
+	[ "$auto_reconnect" = "0" ] && procd_append_param command --no-reconnect
+
+	# procd already restarts on WG/WAN churn (see service_triggers); the daemon
+	# also self-reconnects. respawn is the last-resort crash guard.
+	procd_set_param respawn "${respawn_threshold:-3600}" "${respawn_timeout:-5}" "${respawn_retry:-0}"
+	procd_set_param stderr 1
+	procd_set_param stdout 1
+	procd_close_instance
+	logger -t lwo "started (listen 127.0.0.1:${listen_port} -> ${server}:${server_port})"
+}
+
+stop_service() {
+	config_load lwo
+	config_get fwmark main fwmark
+	del_fwmark_rule "$fwmark"
+	logger -t lwo "stopped"
+}
+
+service_triggers() {
+	procd_add_reload_trigger "lwo"
+	# Restart when WAN reconnects so the outbound socket re-binds to a fresh route.
+	procd_add_interface_trigger "interface.*.up" wan /etc/init.d/lwo restart
+}

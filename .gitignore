@@ -1,0 +1,19 @@
+# Rust
+/lwo-proxy/target/
+target/
+
+# OpenWrt SDK build output (if building in-tree)
+/bin/
+/build_dir/
+/staging_dir/
+/tmp/
+
+# Editors / OS
+*.swp
+.DS_Store
+
+/.claude/
+/.specify/
+/CLAUDE.md
+# IDE
+/.idea/

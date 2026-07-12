@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Restart the LWO proxy when the WireGuard interface or WAN comes up, so the
+# outbound socket re-binds against the current default route.
+
+[ "$ACTION" = "ifup" ] || exit 0
+
+. /lib/functions.sh
+
+config_load lwo
+config_get enabled main enabled 0
+config_get iface main interface ""
+
+[ "$enabled" = "1" ] || exit 0
+
+case "$INTERFACE" in
+	"$iface" | wan | wan6)
+		logger -t lwo "interface $INTERFACE up; restarting proxy"
+		/etc/init.d/lwo restart
+		;;
+esac

@@ -1,0 +1,107 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# rpcd backend for luci-app-mullvad-lwo.
+# Exposes ubus object "luci.lwo" with: status, logs, start, stop, restart.
+
+. /usr/share/libubox/jshn.sh
+
+lwo_running() {
+	pidof lwo-proxy >/dev/null 2>&1 || pgrep -f /usr/sbin/lwo-proxy >/dev/null 2>&1
+}
+
+method_status() {
+	local iface server port enabled handshake rx tx line running
+	iface="$(uci -q get lwo.main.interface)"
+	server="$(uci -q get lwo.main.server)"
+	port="$(uci -q get lwo.main.server_port)"
+	enabled="$(uci -q get lwo.main.enabled)"
+
+	running=0
+	lwo_running && running=1
+
+	handshake=0; rx=0; tx=0
+	if [ -n "$iface" ]; then
+		# `wg show <iface> dump`: line 1 is the interface, subsequent lines are
+		# peers: pubkey psk endpoint allowed-ips latest-handshake rx tx keepalive
+		line="$(wg show "$iface" dump 2>/dev/null | sed -n '2p')"
+		if [ -n "$line" ]; then
+			handshake="$(echo "$line" | awk '{print $5}')"
+			rx="$(echo "$line" | awk '{print $6}')"
+			tx="$(echo "$line" | awk '{print $7}')"
+		fi
+	fi
+
+	json_init
+	json_add_boolean enabled "${enabled:-0}"
+	json_add_boolean running "$running"
+	json_add_string interface "$iface"
+	json_add_string server "$server"
+	json_add_string server_port "$port"
+	json_add_int latest_handshake "${handshake:-0}"
+	json_add_int rx_bytes "${rx:-0}"
+	json_add_int tx_bytes "${tx:-0}"
+	json_dump
+}
+
+method_logs() {
+	local log
+	log="$(logread -e lwo 2>/dev/null | tail -n 200)"
+	json_init
+	json_add_string log "$log"
+	json_dump
+}
+
+method_action() {
+	local action="$1"
+	/etc/init.d/lwo "$action" >/dev/null 2>&1
+	json_init
+	json_add_boolean success 1
+	json_dump
+}
+
+method_switch() {
+	local input ip rc
+	input="$(cat)"
+	json_load "$input" 2>/dev/null
+	json_get_var ip ip
+	/usr/sbin/lwo-switch use "$ip" >/dev/null 2>&1; rc=$?
+	json_init
+	json_add_boolean success $([ $rc -eq 0 ] && echo 1 || echo 0)
+	json_dump
+}
+
+method_lwo_switch() {
+	local rc
+	/usr/sbin/lwo-switch "$1" >/dev/null 2>&1; rc=$?
+	json_init
+	json_add_boolean success $([ $rc -eq 0 ] && echo 1 || echo 0)
+	json_dump
+}
+
+case "$1" in
+	list)
+		json_init
+		json_add_object "status"; json_close_object
+		json_add_object "logs"; json_close_object
+		json_add_object "start"; json_close_object
+		json_add_object "stop"; json_close_object
+		json_add_object "restart"; json_close_object
+		json_add_object "switch"; json_add_string "ip" ""; json_close_object
+		json_add_object "next"; json_close_object
+		json_add_object "failover"; json_close_object
+		json_dump
+		;;
+	call)
+		case "$2" in
+			status)   method_status ;;
+			logs)     method_logs ;;
+			start)    method_action start ;;
+			stop)     method_action stop ;;
+			restart)  method_action restart ;;
+			switch)   method_switch ;;
+			next)     method_lwo_switch next ;;
+			failover) method_lwo_switch failover ;;
+			*)        echo '{}' ;;
+		esac
+		;;
+esac

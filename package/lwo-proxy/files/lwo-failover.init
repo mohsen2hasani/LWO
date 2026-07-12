@@ -1,0 +1,27 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Background watcher that auto-fails-over the LWO tunnel across the configured
+# relays. Runs only when lwo.main.failover='1'. Managed by procd.
+
+USE_PROCD=1
+START=95
+STOP=01
+
+start_service() {
+	local enabled
+	config_load lwo
+	config_get_bool enabled main failover 0
+	[ "$enabled" = "1" ] || return 0
+
+	procd_open_instance
+	procd_set_param command /usr/sbin/lwo-switch watch
+	procd_set_param respawn "${respawn_threshold:-3600}" "${respawn_timeout:-5}" 0
+	procd_set_param stderr 1
+	procd_set_param stdout 1
+	procd_close_instance
+}
+
+service_triggers() {
+	# Restart when /etc/config/lwo changes (e.g. the GUI toggles failover).
+	procd_add_reload_trigger "lwo"
+}

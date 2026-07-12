@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Build a signed apk feed and publish it to GitHub Pages, so the packages can be
+# installed from LuCI -> System -> Software.
+#
+# Prerequisites (see docs/FEED.md):
+#   - The repo (or a separate feed repo) must be PUBLIC for routers to fetch Pages.
+#   - Secret APK_PRIVATE_KEY  = the apk feed signing private key.
+#   - feed/public-key.pem     = the matching public key (committed, published to routers).
+#   - Settings -> Pages -> Source = GitHub Actions.
+# Runs on a version tag (e.g. v1.0.0) or manually.
+
+name: Publish feed (GitHub Pages)
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  ARCH: arm_cortex-a7_neon-vfpv4
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Build signed packages + index
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ env.ARCH }}
+          FEEDNAME: lwo
+          PACKAGES: lwo-proxy luci-app-mullvad-lwo
+          INDEX: '1'
+          PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
+          NO_REFRESH_CHECK: 1
+
+      - name: Assemble Pages site
+        run: |
+          set -e
+          dest="public/${ARCH}"
+          mkdir -p "$dest"
+          cp -v bin/packages/${ARCH}/lwo/* "$dest"/ 2>/dev/null || true
+          if [ -f feed/public-key.pem ]; then
+            cp -v feed/public-key.pem public/
+          else
+            echo "WARNING: feed/public-key.pem is missing — routers won't be able to trust the feed"
+          fi
+          printf '<h1>lwo apk feed</h1><p>arch: %s</p>\n' "$ARCH" > public/index.html
+          echo "--- published tree ---"; ls -R public
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
