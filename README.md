@@ -68,6 +68,10 @@ Either way, the procd services are auto-enabled on install — no `service … e
   automatically moves to the next working relay if the current one dies — no scripts, no cron.
 - **Logs** — live daemon log.
 
+| Status | Configuration |
+|---|---|
+| [![Status page](docs/images/Status.png)](docs/images/Status.png) | [![Configuration page](docs/images/Configuration.png)](docs/images/Configuration.png) |
+
 **From the shell** (equivalent to the buttons):
 ```sh
 service lwo {start|stop|restart}
