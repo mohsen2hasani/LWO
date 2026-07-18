@@ -93,5 +93,10 @@ The `[profile.release]` in `Cargo.toml` is tuned for the router overlay:
   only as XOR masks. Confirmed safe by Stage 1 §4.1.
 - **Fixed local port** instead of Mullvad's ephemeral port — see Stage 2 §4. This is the only
   behavioural deviation; the protocol bytes are identical.
-- **`current_thread` runtime** to keep memory low on the router; the two forwarding tasks run
-  concurrently on it. Can be switched to multi-thread if throughput demands it.
+- **Multi-threaded runtime (2 workers)** so the two forwarding directions can run on separate
+  cores. The socket send/receive buffers are also enlarged (`SO_*BUF`, Linux) to avoid dropping
+  bursts on high-latency links.
+- **Throughput note:** on a weak SoC the ceiling is dominated by kernel per-packet work
+  (WireGuard crypto + the userspace loopback hop + NAT), not the daemon itself, so the above
+  are modest gains — a slow router will still cap well below its raw link speed. This is
+  inherent to a userspace obfuscation proxy, not a misconfiguration.

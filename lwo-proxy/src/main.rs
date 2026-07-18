@@ -27,7 +27,10 @@ fn main() -> ExitCode {
 
     logger::init(cfg.log_level);
 
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+    // Multi-threaded so the two forwarding directions can run on separate cores.
+    // 2 workers is plenty (the daemon is light) and leaves cores for softirq/WG.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
     {

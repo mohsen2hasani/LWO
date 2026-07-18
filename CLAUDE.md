@@ -17,13 +17,14 @@ alone — only the transport changes.
 - Target: **Google Wifi AC-1304** (`arm_cortex-a7_neon-vfpv4`), OpenWrt 25.12
   (`ipq40xx/chromium`), kernel 6.12. Validated end-to-end on that hardware (works through an
   ISP that blocks plain WireGuard).
-- Repo: https://github.com/mohsen2hasani/LWO (public, GPL-3.0-or-later). Latest release: **v1.0.0**.
+- Repo: https://github.com/mohsen2hasani/LWO (public, GPL-3.0-or-later). Latest release: **v1.1.0**.
 
 ## Repository layout
 - `lwo-proxy/` — the Rust daemon. **`src/lwo_core.rs` is VENDORED VERBATIM** from Mullvad
   (`tunnel-obfuscation/src/lwo.rs`, GPL-3.0-or-later; exact commit pinned in
   `docs/UPSTREAM.md`) — don't edit it; re-sync per UPSTREAM.md. Everything else is original
-  glue. Deps: `tokio` + `rand` (+ `nix` on Linux for fwmark).
+  glue. Deps: `tokio` + `rand` (+ `nix` on Linux for fwmark and socket-buffer tuning).
+  Multi-threaded tokio runtime (2 workers); UDP socket buffers enlarged for high-latency links.
   - `config.rs` (CLI/UCI config + dependency-free base64 key decode), `proxy.rs` (`bind`+`serve`
     UDP proxy, fwmark socket), `main.rs` (runtime, signals, supervisor/reconnect),
     `logger.rs`, `tests/loopback.rs` (e2e round-trip + key-direction check).
@@ -58,12 +59,17 @@ alone — only the transport changes.
 - **DNS:** `dhcp.@dnsmasq[0].server=10.64.0.1` + `noresolv=1` (Mullvad DNS through the tunnel).
 - **Relay loop bypass:** a `/32` route for the relay IP via the WAN gateway keeps `lwo-proxy`'s
   own packets off the tunnel.
-- **LWO relay port** is non-standard (e.g. `33770`) — read it from `mullvad status -v` on a
-  device where LWO works; relay pubkey from `api.mullvad.net/app/v1/relays`.
+- **LWO relay port** is non-standard AND **per-relay** (e.g. `33770` and `4849` on different
+  relays) — read each from `mullvad status -v` while connected to that relay; relay pubkey from
+  `api.mullvad.net/app/v1/relays`. A wrong port can still handshake but perform poorly.
 - **Multi-relay + failover:** `lwo.main.peer` list of `"IP KEY [PORT]"`;
   `lwo-switch {list|use <ip>|next|check|failover}`; auto-failover via the `lwo-failover` service
   (`failover` / `failover_interval`, exposed as a LuCI toggle).
 - A working handshake proves the ISP isn't blocking — remaining issues are local routing/DNS.
+- **Throughput ceiling:** on a weak SoC (e.g. 717 MHz Cortex-A7) the limit is kernel per-packet
+  work — WireGuard crypto + the userspace loopback hop + NAT — not the daemon (which stays well
+  under one core). Multi-thread runtime + enlarged socket buffers help modestly; a slow router
+  still caps well below its link speed. Inherent to a userspace obfuscation proxy, not a bug.
 
 ## Conventions
 - License **GPL-3.0-or-later** everywhere (SPDX headers on all authored files; matches Mullvad).
@@ -72,7 +78,11 @@ alone — only the transport changes.
 - History has been intentionally squashed to a clean root (force-push) more than once.
 
 ## Status / outstanding
-- `v1.0.0` is tagged; the publish workflow (~2h) deploys the signed feed to GitHub Pages.
-- **Not yet verified:** the first `apk update` on a live router accepting the apk-v3 signed
-  feed. If the signature is rejected, that's the one thing to iterate on (key type / publishing
-  the SDK-derived public key). Everything else is validated.
+- `v1.1.0`: adds multi-thread runtime + enlarged socket buffers (perf). Host tests + a
+  `cargo check --target x86_64-unknown-linux-musl` (to compile-check the Linux-only `nix` code)
+  both pass. Not yet rebuilt/redeployed to the router at time of writing.
+- The signed apk feed is published to GitHub Pages; the feed repo line must point at the full
+  `.../<arch>/packages.adb` URL (a bare dir URL makes apk fall back to legacy opkg and fail).
+- `recvmmsg`/`sendmmsg` batching was intentionally NOT added: measured load showed the ceiling
+  is kernel softirq (WG crypto + loopback hop), not syscalls, so batching wouldn't help and is
+  Linux-only/untestable on the dev host.

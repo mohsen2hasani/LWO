@@ -48,6 +48,10 @@ impl Proxy {
             Arc::new(create_remote_socket(cfg.server_addr.is_ipv4(), cfg.fwmark).await?);
         remote_socket.connect(cfg.server_addr).await?;
 
+        // Enlarge socket buffers so bursts on high-latency links aren't dropped.
+        tune_buffers(&client_socket);
+        tune_buffers(&remote_socket);
+
         Ok(Proxy {
             client_socket,
             remote_socket,
@@ -155,3 +159,22 @@ async fn create_remote_socket(ipv4: bool, fwmark: Option<u32>) -> io::Result<Udp
 
     Ok(socket)
 }
+
+/// Enlarge a UDP socket's send/receive buffers (best-effort). Default buffers can
+/// drop bursts on high-latency links, which makes TCP back off and caps throughput.
+/// `SO_*BUFFORCE` bypasses the net.core.rmem_max/wmem_max ceilings (the daemon runs
+/// as root under procd); if that isn't permitted we fall back to the capped `SO_*BUF`.
+#[cfg(target_os = "linux")]
+fn tune_buffers(sock: &UdpSocket) {
+    use nix::sys::socket::{setsockopt, sockopt};
+    const SZ: usize = 4 * 1024 * 1024;
+    if setsockopt(sock, sockopt::RcvBufForce, &SZ).is_err() {
+        let _ = setsockopt(sock, sockopt::RcvBuf, &SZ);
+    }
+    if setsockopt(sock, sockopt::SndBufForce, &SZ).is_err() {
+        let _ = setsockopt(sock, sockopt::SndBuf, &SZ);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tune_buffers(_sock: &UdpSocket) {}

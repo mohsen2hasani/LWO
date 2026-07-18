@@ -79,8 +79,8 @@ GitHub Pages. Under the hood it runs `openwrt/gh-action-sdk` with `INDEX=1` and 
 **Publish a release**
 ```sh
 # bump PKG_VERSION / PKG_RELEASE (and the crate version) first, then:
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 The workflow builds and deploys; `public-key.pem` lands at the site root and the packages
 under `/<arch>/`. Bump the version and push a new `vX.Y.Z` tag for each release.
