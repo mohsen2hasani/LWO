@@ -12,8 +12,5 @@ target/
 *.swp
 .DS_Store
 
-/.claude/
-/.specify/
-/CLAUDE.md
 # IDE
 /.idea/
