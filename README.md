@@ -1,8 +1,9 @@
 # mullvad-lwo for OpenWrt
 
-> **Note:** This project was developed with the help of Claude AI. The obfuscation core is
-> vendored verbatim from Mullvad (see [`docs/UPSTREAM.md`](docs/UPSTREAM.md)); the surrounding
-> OpenWrt glue was AI-assisted and validated end-to-end on real hardware.
+> **Note:** This project was developed with the help of Claude AI. I understand the code,
+> stand behind it, and maintain it — the AI was a tool, with a human in the loop throughout.
+> The obfuscation core is vendored verbatim from Mullvad (see [`docs/UPSTREAM.md`](docs/UPSTREAM.md));
+> the surrounding OpenWrt glue was AI-assisted and validated end-to-end on real hardware.
 
 Bring **Mullvad's Lightweight WireGuard Obfuscation (LWO)** to OpenWrt — no Mullvad GUI, no
 `mullvad-daemon`, just a small router-friendly daemon that obfuscates an existing WireGuard
