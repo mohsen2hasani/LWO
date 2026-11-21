@@ -34,6 +34,66 @@ function peerIPs() {
 	}).filter(Boolean);
 }
 
+// Parse a relay file: one "IP KEY [PORT]" per line; blank lines and #comments ignored.
+function parseRelays(text) {
+	var ok = [], bad = [];
+	text.split(/\r?\n/).forEach(function(raw, i) {
+		var line = raw.replace(/#.*/, '').trim();
+		if (!line) return;
+		var f = line.split(/\s+/);
+		var port = f.length === 3 ? +f[2] : 1;
+		if (f.length <= 3 && /^\d{1,3}(\.\d{1,3}){3}$/.test(f[0]) &&
+		    /^[A-Za-z0-9+\/]{43}=$/.test(f[1] || '') && port >= 1 && port <= 65535 && port % 1 === 0)
+			ok.push(f.join(' '));
+		else
+			bad.push(i + 1);
+	});
+	return { ok: ok, bad: bad };
+}
+
+// Imported entries replace existing ones with the same IP (in place); new IPs are appended.
+function mergeRelays(cur, add) {
+	var ip = function(e) { return String(e).trim().split(/\s+/)[0]; };
+	var byIp = {};
+	add.forEach(function(e) { byIp[ip(e)] = e; });
+	var out = cur.map(function(e) {
+		var n = byIp[ip(e)];
+		delete byIp[ip(e)];
+		return n || e;
+	});
+	return out.concat(Object.keys(byIp).map(function(k) { return byIp[k]; }));
+}
+
+function importRelays() {
+	var file = document.getElementById('lwo-import-file').files[0];
+	if (!file)
+		return ui.addNotification(null, E('p', _('Choose a text file first.')), 'warning');
+
+	return file.text().then(function(text) {
+		var r = parseRelays(text);
+		if (!r.ok.length)
+			return ui.addNotification(null, E('p', _('No valid relay lines found in the file.')), 'danger');
+
+		var replace = document.getElementById('lwo-import-replace').checked;
+		var cur = replace ? [] : [].concat(uci.get('lwo', 'main', 'peer') || []);
+		uci.set('lwo', 'main', 'peer', mergeRelays(cur, r.ok));
+
+		var msg = _('Imported %d relay(s).').format(r.ok.length);
+		if (r.bad.length)
+			msg += ' ' + _('Skipped invalid line(s): %s.').format(r.bad.join(', '));
+		return uci.save().then(function() {
+			// Reload so the form shows the staged list; Save & Apply then activates it.
+			ui.showModal(_('Relays imported'), [
+				E('p', msg + ' ' + _('Press Save & Apply to activate.')),
+				E('div', { 'class': 'right' }, E('button', {
+					'class': 'btn cbi-button-action',
+					'click': function() { window.location.reload(); }
+				}, _('OK')))
+			]);
+		});
+	});
+}
+
 return view.extend({
 	load: function() {
 		return uci.load('lwo');
@@ -134,6 +194,24 @@ return view.extend({
 				])
 			]);
 
+			var importCtl = E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Import relays from file')),
+				E('p', {}, _('A plain text file with one relay per line, same format as the list above: ' +
+				  '<code>ENDPOINT_IP PUBLIC_KEY [PORT]</code>. Blank lines and <code>#</code> comments ' +
+				  'are ignored. Relays with an IP already in the list are updated.')),
+				E('div', { 'class': 'cbi-value' }, [
+					E('input', { 'type': 'file', 'id': 'lwo-import-file', 'accept': '.txt,.conf,.list,text/plain' }),
+					' ',
+					E('label', {}, [ E('input', { 'type': 'checkbox', 'id': 'lwo-import-replace' }),
+						' ', _('Replace the whole list') ]),
+					' ',
+					E('button', {
+						'class': 'btn cbi-button cbi-button-add',
+						'click': ui.createHandlerFn(this, importRelays)
+					}, _('Import'))
+				])
+			]);
+
 			var svcCtl = E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Service control')),
 				E('div', { 'class': 'cbi-value' }, [
@@ -143,7 +221,7 @@ return view.extend({
 				])
 			]);
 
-			return E([], [ mapEl, relayCtl, svcCtl ]);
+			return E([], [ mapEl, importCtl, relayCtl, svcCtl ]);
 		}, this));
 	}
 });

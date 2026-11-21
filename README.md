@@ -333,6 +333,29 @@ In **LuCI → Services → Mullvad LWO → Configuration**, the relays are a mul
 field with a dropdown + **Switch / Next / Failover** buttons, and an **Auto failover** checkbox
 + interval. So end users can set everything up in the GUI without touching the shell.
 
+**Importing a relay list.** Instead of adding rows one by one, use **Import relays from file**
+on the same page: a plain text file with one `IP KEY [PORT]` per line (blank lines and `#`
+comments ignored). Relays whose IP is already listed are updated; tick **Replace the whole
+list** to start fresh. Then **Save & Apply**.
+
+**No leak while switching.** `lwo-switch` swaps the WireGuard peer and the relay-bypass route
+live, without taking `wg_mullvad` down, so the tunnel routes stay in place. During the switch,
+traffic goes into the tunnel and is dropped until the new relay handshakes. It never falls back
+to WAN.
+
+## Upgrading OpenWrt (sysupgrade)
+
+These packages aren't in the official feeds, so you have to exclude them from Attended
+Sysupgrade / `owut`. The packages ship `/lib/upgrade/keep.d` entries, so `sysupgrade` keeps
+their files, the service-enable links and the feed key/repo line. After the upgrade, LWO comes
+back on first boot and you keep internet access. Then re-register the packages so `apk` tracks
+them again:
+```sh
+apk update && apk add lwo-proxy luci-app-mullvad-lwo
+```
+This needs the new firmware to include `kmod-wireguard` and `wireguard-tools`, and LWO must
+be at v1.2.0+ *before* you upgrade.
+
 ## Quick start (if WireGuard is already set up)
 
 1. Install the packages (see [`docs/INSTALL.md`](docs/INSTALL.md)).

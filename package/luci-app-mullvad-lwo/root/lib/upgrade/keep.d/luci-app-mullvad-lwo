@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Kept across sysupgrade (not in the official feeds); see /lib/upgrade/keep.d/lwo-proxy.
+/www/luci-static/resources/view/lwo/
+/usr/libexec/rpcd/luci.lwo
+/usr/share/rpcd/acl.d/luci-app-mullvad-lwo.json
+/usr/share/luci/menu.d/luci-app-mullvad-lwo.json

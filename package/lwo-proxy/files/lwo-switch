@@ -8,7 +8,8 @@
 # same port across relays, so usually you only need "IP KEY").
 #
 # A switch updates the lwo proxy (server/pubkey/port) AND the kernel WireGuard
-# peer key + relay bypass route, restarts both, and checks for a handshake.
+# peer key + relay bypass route (live, without taking the wg interface down, so
+# nothing leaks out WAN mid-switch), restarts the proxy, and checks for a handshake.
 
 . /lib/functions.sh
 
@@ -43,7 +44,9 @@ handshake_age() {
 }
 
 apply() { # ip key port
+	local old_ip lport aips ka gw p
 	msg "switching to $1:$3"
+	old_ip="$(uci -q get lwo.main.server)"
 	uci set lwo.main.server="$1"
 	uci set lwo.main.server_pubkey="$2"
 	uci set lwo.main.server_port="$3"
@@ -52,7 +55,25 @@ apply() { # ip key port
 	uci set network.$WG_PEER.public_key="$2"
 	uci set network.$BYPASS.target="$1/32"
 	uci commit network
-	ifup "$WG_IFACE"
+
+	# Swap the peer and bypass route live instead of `ifup` (which does down+up and drops the
+	# wg routes, so LAN traffic leaks out WAN). The routes stay up: until the new relay
+	# handshakes, traffic goes into the tunnel and is dropped, never out WAN.
+	if wg show "$WG_IFACE" >/dev/null 2>&1; then
+		lport="$(uci -q get lwo.main.listen_port)"
+		aips="$(uci -q get network.$WG_PEER.allowed_ips | tr ' ' ',')"
+		ka="$(uci -q get network.$WG_PEER.persistent_keepalive)"
+		gw="$(uci -q get network.$BYPASS.gateway)"
+		[ -n "$gw" ] && ip route replace "$1/32" via "$gw"
+		[ -n "$old_ip" ] && [ "$old_ip" != "$1" ] && ip route del "$old_ip/32" 2>/dev/null
+		for p in $(wg show "$WG_IFACE" peers); do
+			[ "$p" = "$2" ] || wg set "$WG_IFACE" peer "$p" remove
+		done
+		wg set "$WG_IFACE" peer "$2" endpoint "127.0.0.1:${lport:-51820}" \
+			allowed-ips "$aips" ${ka:+persistent-keepalive "$ka"}
+	else
+		ifup "$WG_IFACE"
+	fi
 	/etc/init.d/lwo restart
 }
 

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Kept across sysupgrade. lwo-proxy is not in the official feeds, so a firmware
+# upgrade drops it while /etc/config (wg routes, DNS 10.64.0.1) stays pointed at
+# the tunnel: no internet, so nothing can be reinstalled. Keeping the files (and
+# the rc.d enable links) brings the tunnel back on first boot.
+/usr/sbin/lwo-proxy
+/usr/sbin/lwo-switch
+/etc/init.d/lwo
+/etc/init.d/lwo-failover
+/etc/rc.d/S90lwo
+/etc/rc.d/K10lwo
+/etc/rc.d/S95lwo-failover
+/etc/rc.d/K01lwo-failover
+/etc/hotplug.d/iface/99-lwo
+/etc/apk/keys/lwo-feed.pem
+/etc/apk/repositories.d/lwo.list

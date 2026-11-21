@@ -6,7 +6,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=lwo-proxy
-PKG_VERSION:=1.1.0
+PKG_VERSION:=1.2.0
 PKG_RELEASE:=1
 
 # This package builds the Rust crate directly from the checked-out repo (no
@@ -81,6 +81,9 @@ define Package/lwo-proxy/install
 
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface
 	$(INSTALL_BIN) ./files/lwo.hotplug $(1)/etc/hotplug.d/iface/99-lwo
+
+	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
+	$(INSTALL_DATA) ./files/lwo.keep $(1)/lib/upgrade/keep.d/lwo-proxy
 endef
 
 $(eval $(call BuildPackage,lwo-proxy))
