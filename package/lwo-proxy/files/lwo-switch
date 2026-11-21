@@ -154,6 +154,7 @@ CACHE=/tmp/lwo-relays.json
 PROBE_IF=wg_probe
 config_get PROBE_WAIT main probe_timeout 6
 config_get MAX_RELAYS main max_relays 20
+config_get RANK_PINGS main rank_pings 15
 
 fetch_relays() {
 	# grep: never cache a captive-portal page or error body as the relay list
@@ -228,6 +229,41 @@ probe() { # ip key
 # probe_mode 'switch' (default): the main tunnel itself is moved to each relay in turn, so
 # no second device is needed but the internet pauses (dropped, never leaked) during the test.
 # probe_mode 'device': a second device key probes on wg_probe while the tunnel stays up.
+# Order working relays (IP KEY lines) best-first by packet loss, then latency, measured over
+# plain WAN (the ISP path is what limits speed). All relays are pinged at once through
+# temporary /32 routes; routes that already exist (the live relay) are left alone.
+rank() {
+	local ip key dir out loss rtt
+	[ -n "$WAN_VIA" ] || { printf '%s' "$1"; return; }
+	dir=/tmp/lwo-rank; rm -rf "$dir"; mkdir -p "$dir"
+	while read -r ip key; do
+		[ -n "$ip" ] || continue
+		if [ -z "$(ip -4 route show "$ip/32" 2>/dev/null)" ]; then
+			ip route replace "$ip/32" $WAN_VIA && RANK_ROUTES="$RANK_ROUTES $ip"
+		fi
+		ping -c "$RANK_PINGS" -W 1 "$ip" > "$dir/$ip" 2>/dev/null &
+	done <<-EOF
+	$1
+	EOF
+	wait
+	rank_cleanup
+	printf '%s' "$1" | while read -r ip key; do
+		[ -n "$ip" ] || continue
+		out="$(cat "$dir/$ip" 2>/dev/null)"
+		loss="$(echo "$out" | sed -n 's/.* \([0-9]*\)% packet loss.*/\1/p')"
+		rtt="$(echo "$out" | sed -n 's|.*= [0-9.]*/\([0-9]*\)[.0-9]*/.*|\1|p')"
+		msg "  rank  $ip loss=${loss:-100}% rtt=${rtt:-?}ms"
+		printf '%03d %05d %s %s\n' "${loss:-100}" "${rtt:-99999}" "$ip" "$key"
+	done | sort | cut -d' ' -f3-
+	rm -rf "$dir"
+}
+
+rank_cleanup() {
+	local ip
+	for ip in $RANK_ROUTES; do ip route del "$ip/32" 2>/dev/null; done
+	RANK_ROUTES=""
+}
+
 # Switch mode: drop the staged test relay and go back to the relay that was live before the
 # test (also run from the EXIT trap if the update is killed mid-test).
 restore_switch() {
@@ -256,7 +292,7 @@ update() { # [country code] -> replace lwo.main.peer with that country's relays 
 		{ msg "enable LWO and connect to a relay first"; return 1; }
 	echo $$ > "$RUNFILE"
 	PROBING=0
-	trap 'probe_stop; [ "$PROBING" = 1 ] && restore_switch; rm -f "$RUNFILE"' EXIT
+	trap 'probe_stop; rank_cleanup; [ "$PROBING" = 1 ] && restore_switch; rm -f "$RUNFILE"' EXIT
 	trap 'exit 1' INT TERM
 
 	msg "updating relays for '$cc'..."
@@ -306,6 +342,9 @@ update() { # [country code] -> replace lwo.main.peer with that country's relays 
 		[ "$mode" = switch ] && restore_switch
 		return 1
 	fi
+	msg "ranking $n working relays by packet loss and latency (~${RANK_PINGS}s)..."
+	ok="$(rank "$ok")
+"
 	if [ "$mode" = switch ]; then
 		PROBING=0
 		uci -q revert lwo; uci -q revert network
@@ -314,10 +353,9 @@ update() { # [country code] -> replace lwo.main.peer with that country's relays 
 	printf '%s' "$ok" | while read -r ip key; do uci add_list lwo.main.peer="$ip $key"; done
 	uci set lwo.main.country="$cc"
 	uci commit lwo
-	msg "kept $n of $total $cc relays"
-	# Stay on (or, in switch mode, go back to) the old relay if it passed; else take the first.
-	target="$SRV"
-	printf '%s' "$ok" | cut -d' ' -f1 | grep -qxF "$SRV" || target="$(printf '%s' "$ok" | head -n1 | cut -d' ' -f1)"
+	msg "kept $n of $total $cc relays, best first"
+	# Go to the best-ranked relay (in switch mode the tunnel is on a test relay anyway).
+	target="$(printf '%s' "$ok" | head -n1 | cut -d' ' -f1)"
 	[ "$mode" = switch ] || [ "$target" != "$SRV" ] && "$0" use "$target"
 	[ "$mode" = switch ] && drop_test_routes "$target"
 	return 0

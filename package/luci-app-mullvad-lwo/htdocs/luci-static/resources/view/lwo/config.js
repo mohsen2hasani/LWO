@@ -209,8 +209,10 @@ return view.extend({
 				E('h3', {}, _('Relay switching')),
 				E('p', {}, _('Save & Apply any changes to the relay list first, then switch. ' +
 				  '<em>Update relay list</em> downloads the selected country\'s LWO relays, tests each one ' +
-				  'from this router (a few seconds per relay, using the test mode above) and keeps only ' +
-				  'the ones that connect. Save & Apply the country and test mode first.')),
+				  'from this router (a few seconds per relay, using the test mode above), keeps only ' +
+				  'the ones that connect, ranks them by packet loss and latency (~15 s) and switches to ' +
+				  'the best. The list is saved best-first, so failover and Next follow that order. ' +
+				  'Save & Apply the test mode first.')),
 				E('div', { 'class': 'cbi-value' }, [
 					sel, ' ',
 					btn.call(this, _('Switch to selected'), 'cbi-button-apply', function() {

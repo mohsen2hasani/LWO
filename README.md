@@ -341,7 +341,10 @@ list** to start fresh. Then **Save & Apply**.
 **Update relay list**. The router downloads that country's LWO relays from the Mullvad API,
 tests each one from your own connection and keeps only the ones that connect. Your ISP may
 block some relays or ports. If the active relay didn't pass, it switches to the first one that
-did. Choose how relays are tested with **Relay test mode** (`lwo.main.probe_mode`):
+did. The working relays are then **ranked by packet loss and latency** over plain WAN (your
+ISP's path is usually what limits speed) and the list is saved best-first. The update switches
+to the best one, and failover and **Next relay** follow that order. Choose how relays are
+tested with **Relay test mode** (`lwo.main.probe_mode`):
 
 - **Pause internet** (`switch`, default): no setup. The main tunnel moves to each relay for a
   few seconds, then reconnects to the best one. Traffic is dropped while it tests, never leaked.

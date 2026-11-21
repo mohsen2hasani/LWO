@@ -78,6 +78,10 @@ alone — only the transport changes.
   tunnel. Peer-only changes don't restart `wg_mullvad` (netifd diffs interface sections only).
   Relay /32 routes are built like netifd does: `gateway` + `ifstatus <iface>` l3_device (PPPoE).
   JSON parsing is `ucode` (always present: firewall4 depends on it).
+- **Ranking (1.2.1):** after the reachability test, `rank()` pings all working relays at once
+  over WAN (temporary /32 via `wan_via`, existing routes left alone), sorts by loss then avg RTT,
+  saves `peer` best-first and `use`s the best. Throughput is limited by ISP-path loss, not the
+  router (measured 2026-11-21: 6-46% loss to every relay over plain WAN, router idle).
 - **Multi-relay + failover:** `lwo.main.peer` list of `"IP KEY [PORT]"`;
   `lwo-switch {list|use <ip>|next|check|failover}`; auto-failover via the `lwo-failover` service
   (`failover` / `failover_interval`, exposed as a LuCI toggle).
