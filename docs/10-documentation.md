@@ -106,8 +106,8 @@ Relay switching / failover (used by `lwo-switch`, not the daemon):
 
 ## Switching relays / failover
 
-Across Mullvad relays only the endpoint IP and peer public key differ (the LWO port is
-constant), so a relay is an `(IP, key)` pair. `lwo-switch` swaps the active relay by updating
+Across Mullvad relays only the endpoint IP and peer public key differ (any WireGuard
+port works for LWO), so a relay is an `(IP, key)` pair. `lwo-switch` swaps the active relay by updating
 the proxy config **and** the kernel WG peer key + bypass route together, then restarting and
 checking the handshake:
 

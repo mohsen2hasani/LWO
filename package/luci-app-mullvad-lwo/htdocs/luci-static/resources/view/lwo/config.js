@@ -13,6 +13,8 @@ var callRestart  = rpc.declare({ object: 'luci.lwo', method: 'restart',  params:
 var callNext     = rpc.declare({ object: 'luci.lwo', method: 'next',     params: [] });
 var callFailover = rpc.declare({ object: 'luci.lwo', method: 'failover', params: [] });
 var callSwitch   = rpc.declare({ object: 'luci.lwo', method: 'switch',   params: [ 'ip' ] });
+var callUpdate   = rpc.declare({ object: 'luci.lwo', method: 'update',   params: [ 'country' ] });
+var callCountries = rpc.declare({ object: 'luci.lwo', method: 'countries', expect: { countries: [] } });
 
 function btn(label, cls, fn) {
 	return E('button', {
@@ -41,9 +43,10 @@ function parseRelays(text) {
 		var line = raw.replace(/#.*/, '').trim();
 		if (!line) return;
 		var f = line.split(/\s+/);
-		var port = f.length === 3 ? +f[2] : 1;
-		if (f.length <= 3 && /^\d{1,3}(\.\d{1,3}){3}$/.test(f[0]) &&
-		    /^[A-Za-z0-9+\/]{43}=$/.test(f[1] || '') && port >= 1 && port <= 65535 && port % 1 === 0)
+		var ipOk = /^\d{1,3}(\.\d{1,3}){3}$/.test(f[0]) &&
+			f[0].split('.').every(function(o) { return +o <= 255; });
+		var portOk = f.length < 3 || (/^\d{1,5}$/.test(f[2]) && +f[2] >= 1 && +f[2] <= 65535);
+		if (f.length <= 3 && ipOk && /^[A-Za-z0-9+\/]{43}=$/.test(f[1] || '') && portOk)
 			ok.push(f.join(' '));
 		else
 			bad.push(i + 1);
@@ -96,10 +99,11 @@ function importRelays() {
 
 return view.extend({
 	load: function() {
-		return uci.load('lwo');
+		return Promise.all([ uci.load('lwo'), L.resolveDefault(callCountries(), []) ]);
 	},
 
-	render: function() {
+	render: function(data) {
+		var countries = data[1] || [], countryOpt;
 		var m, s, o;
 
 		m = new form.Map('lwo', _('Mullvad LWO'),
@@ -125,7 +129,7 @@ return view.extend({
 		o.placeholder = '51820';
 
 		o = s.option(form.Value, 'server_port', _('Relay LWO port'),
-			_('UDP port Mullvad LWO relays listen on — the same across relays (e.g. 33770). ' +
+			_('UDP port for the relay. Any Mullvad WireGuard port works with LWO (e.g. 51820). ' +
 			  'Used as the default when a relay entry omits its port.'));
 		o.datatype = 'port';
 
@@ -150,6 +154,29 @@ return view.extend({
 		o.default = 'info';
 
 		// The relay pool — one row per relay: "IP KEY [PORT]".
+		o = s.option(form.Value, 'country', _('Country'),
+			_('Relays of this country are fetched from the Mullvad API by <em>Update relay list</em> ' +
+			  'below. Only countries with LWO relays are listed.'));
+		countries.forEach(function(c) { o.value(c.code, '%s (%s)'.format(c.name, c.code)); });
+		o.placeholder = 'nl';
+		countryOpt = o;
+
+		o = s.option(form.ListValue, 'probe_mode', _('Relay test mode'),
+			_('How <em>Update relay list</em> tests relays. <strong>Pause internet</strong> uses this ' +
+			  'device: the tunnel moves to each relay for a few seconds (traffic is dropped, never ' +
+			  'leaked), then reconnects. <strong>Second device</strong> keeps the internet up but needs ' +
+			  'an extra Mullvad device key.'));
+		o.value('switch', _('Pause internet (this device)'));
+		o.value('device', _('Second device (internet stays up)'));
+		o.default = 'switch';
+
+		o = s.option(form.Value, 'probe_private_key', _('Probe private key'),
+			_('Private key of a <strong>second</strong> Mullvad device, used only to test which relays ' +
+			  'are reachable without touching the main tunnel. Create it with <code>wg genkey</code> ' +
+			  'and add its public key (<code>wg pubkey</code>) to your Mullvad account as a new device.'));
+		o.password = true;
+		o.depends('probe_mode', 'device');
+
 		o = s.option(form.DynamicList, 'peer', _('Relays'),
 			_('Candidate Mullvad relays, one per row: ' +
 			  '<code>ENDPOINT_IP PUBLIC_KEY [PORT]</code>. PORT is optional and defaults to ' +
@@ -180,7 +207,10 @@ return view.extend({
 
 			var relayCtl = E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Relay switching')),
-				E('p', {}, _('Save & Apply any changes to the relay list first, then switch.')),
+				E('p', {}, _('Save & Apply any changes to the relay list first, then switch. ' +
+				  '<em>Update relay list</em> downloads the selected country\'s LWO relays, tests each one ' +
+				  'from this router (a few seconds per relay, using the test mode above) and keeps only ' +
+				  'the ones that connect. Save & Apply the country and test mode first.')),
 				E('div', { 'class': 'cbi-value' }, [
 					sel, ' ',
 					btn.call(this, _('Switch to selected'), 'cbi-button-apply', function() {
@@ -190,7 +220,17 @@ return view.extend({
 					' ',
 					btn.call(this, _('Next relay'), 'cbi-button-neutral', function() { return callNext(); }),
 					' ',
-					btn.call(this, _('Failover now'), 'cbi-button-neutral', function() { return callFailover(); })
+					btn.call(this, _('Failover now'), 'cbi-button-neutral', function() { return callFailover(); }),
+					' ',
+					E('button', {
+						'class': 'btn cbi-button cbi-button-action',
+						'click': ui.createHandlerFn(this, function() {
+							return callUpdate(countryOpt.formvalue('main') || '').then(function() {
+								ui.addNotification(null, E('p', _('Updating the relay list in the background. ' +
+									'Follow progress in the Logs tab, then reload this page.')), 'info');
+							});
+						})
+					}, _('Update relay list'))
 				])
 			]);
 

@@ -3,13 +3,13 @@
 		"description": "Grant access to Mullvad LWO status and configuration",
 		"read": {
 			"ubus": {
-				"luci.lwo": [ "status", "logs" ]
+				"luci.lwo": [ "status", "logs", "countries" ]
 			},
 			"uci": [ "lwo" ]
 		},
 		"write": {
 			"ubus": {
-				"luci.lwo": [ "start", "stop", "restart", "switch", "next", "failover" ]
+				"luci.lwo": [ "start", "stop", "restart", "switch", "next", "failover", "update" ]
 			},
 			"uci": [ "lwo" ]
 		}

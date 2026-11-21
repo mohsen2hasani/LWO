@@ -78,6 +78,36 @@ method_lwo_switch() {
 	json_dump
 }
 
+method_countries() {
+	local code name
+	json_init
+	json_add_array countries
+	while read -r code name; do
+		[ -n "$code" ] || continue
+		json_add_object ""
+		json_add_string code "$code"
+		json_add_string name "$name"
+		json_close_object
+	done <<-EOF
+	$(/usr/sbin/lwo-switch countries 2>/dev/null)
+	EOF
+	json_close_array
+	json_dump
+}
+
+method_update() {
+	local input country
+	input="$(cat)"
+	json_load "$input" 2>/dev/null
+	json_get_var country country
+	# Probing takes a few seconds per relay, longer than an rpc call may block: run it
+	# detached and let the Logs tab show progress.
+	( /usr/sbin/lwo-switch update "$country" 2>&1 | logger -t lwo-switch ) </dev/null >/dev/null 2>&1 &
+	json_init
+	json_add_boolean success 1
+	json_dump
+}
+
 case "$1" in
 	list)
 		json_init
@@ -89,6 +119,8 @@ case "$1" in
 		json_add_object "switch"; json_add_string "ip" ""; json_close_object
 		json_add_object "next"; json_close_object
 		json_add_object "failover"; json_close_object
+		json_add_object "countries"; json_close_object
+		json_add_object "update"; json_add_string "country" ""; json_close_object
 		json_dump
 		;;
 	call)
@@ -101,6 +133,8 @@ case "$1" in
 			switch)   method_switch ;;
 			next)     method_lwo_switch next ;;
 			failover) method_lwo_switch failover ;;
+			countries) method_countries ;;
+			update)   method_update ;;
 			*)        echo '{}' ;;
 		esac
 		;;

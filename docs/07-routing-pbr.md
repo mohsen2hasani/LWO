@@ -131,9 +131,9 @@ non-obvious gotchas worth calling out here.
    goes through wg. With the split `/1` routes above, this `/32` is the most-specific match for
    the relay and always wins.
 
-5. **Getting the LWO port.** The relay's LWO UDP port is not 51820 and isn't in the public API;
-   read it from a device where LWO already works: `mullvad status -v` (e.g. `…:33770/UDP`). The
-   relay's WireGuard public key comes from `https://api.mullvad.net/app/v1/relays`.
+5. **Relays and the LWO port.** `https://api.mullvad.net/app/v1/relays` gives each relay's IP
+   and WireGuard public key, and `features.lwo` marks LWO support. LWO reuses the WireGuard
+   endpoint, so any port in the API's WireGuard `port_ranges` works (e.g. `51820`).
 
 6. **Diagnosing "connected but no internet".** A working `wg` handshake proves the ISP is *not*
    blocking you (the obfuscated packets reached the relay and it replied) — so remaining issues

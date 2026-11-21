@@ -59,9 +59,25 @@ alone — only the transport changes.
 - **DNS:** `dhcp.@dnsmasq[0].server=10.64.0.1` + `noresolv=1` (Mullvad DNS through the tunnel).
 - **Relay loop bypass:** a `/32` route for the relay IP via the WAN gateway keeps `lwo-proxy`'s
   own packets off the tunnel.
-- **LWO relay port** is non-standard AND **per-relay** (e.g. `33770` and `4849` on different
-  relays) — read each from `mullvad status -v` while connected to that relay; relay pubkey from
-  `api.mullvad.net/app/v1/relays`. A wrong port can still handshake but perform poorly.
+- **LWO port:** any port in the WireGuard `port_ranges` of `api.mullvad.net/app/v1/relays`
+  works (LWO reuses the WG endpoint — upstream relay selector; tested on the router 2026-11-21:
+  4849, 51820, 33770 all passed traffic on one relay). Not per-relay. Relays that support LWO
+  have `features.lwo` in that same API, which also gives each relay's IP + pubkey.
+- **Relay list update:** `lwo-switch update [cc]` (LuCI "Update relay list") fetches the API,
+  keeps active `features.lwo` relays of `lwo.main.country`, probes each over WAN via a temporary
+  and rewrites `lwo.main.peer`. `probe_mode`: `switch` (default) moves the main tunnel to each
+  relay (live swap, internet pauses, no leak) then returns to the old/first-good relay;
+  `device` probes on a temporary `wg_probe` + second `lwo-proxy` + `/32` route using
+  `probe_private_key` (a SECOND Mullvad device). The same key on two relays at once does
+  handshake (tested), but is avoided so the account never looks like one device in two places.
+  The active relay is never probed; its pre-test main handshake decides. `failover` is a
+  no-op while an update runs (pid in `/var/run/lwo-update.pid`); switch-mode tests only *stage*
+  uci (reverted at the end/on kill), so a reboot mid-test keeps the committed relay.
+- **`apply()` must `ubus call network reload` after committing** (old code got it via `ifup`):
+  else netifd re-adds the OLD relay's /32 on the next WAN reconnect -> proxy loops into the
+  tunnel. Peer-only changes don't restart `wg_mullvad` (netifd diffs interface sections only).
+  Relay /32 routes are built like netifd does: `gateway` + `ifstatus <iface>` l3_device (PPPoE).
+  JSON parsing is `ucode` (always present: firewall4 depends on it).
 - **Multi-relay + failover:** `lwo.main.peer` list of `"IP KEY [PORT]"`;
   `lwo-switch {list|use <ip>|next|check|failover}`; auto-failover via the `lwo-failover` service
   (`failover` / `failover_interval`, exposed as a LuCI toggle).

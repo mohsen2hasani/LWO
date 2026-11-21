@@ -67,8 +67,8 @@ Either way, the procd services are auto-enabled on install — no `service … e
 **Configure & operate — all in LuCI** (`Services → Mullvad LWO`):
 - **Status** — running / connected, endpoint, latest handshake, bytes in/out.
 - **Configuration** — enable LWO, choose the WireGuard interface, and manage the **Relays**
-  list (one `IP KEY [PORT]` per row — the LWO port is the same across relays, so `PORT` is
-  usually optional). Buttons: **Switch to selected / Next relay / Failover now**, and
+  list (one `IP KEY [PORT]` per row — any WireGuard port works for LWO, so `PORT` is
+  usually omitted). Buttons: **Switch to selected / Next relay / Failover now**, and
   **Connect / Disconnect / Restart**. Tick **Auto failover** (+ interval) and the router
   automatically moves to the next working relay if the current one dies — no scripts, no cron.
 - **Logs** — live daemon log.
@@ -138,22 +138,21 @@ At **mullvad.net → Account → WireGuard configuration**, generate & download 
 
 ### Step 3 — Find the LWO relay endpoint, port, and server key
 
-LWO relays listen on a **non-standard UDP port** (not 51820). The easiest source is a device
-where Mullvad LWO already works (e.g. the desktop app):
+Mullvad's public relay API lists every relay's IP and WireGuard public key, and marks the
+ones that support LWO with `features.lwo`. This prints them for one location (here `nl-ams`)
+as `IP KEY` lines, ready for the relay list or the LuCI **Import relays from file** button:
 
 ```sh
-mullvad status -v
-#   Relay:  nl-ams-wg-008 (193.32.249.73:33770/UDP)   <- server IP : LWO PORT
-#   Features: ... LWO
+curl -s "https://api.mullvad.net/app/v1/relays" | python3 -c '
+import sys, json
+for r in json.load(sys.stdin)["wireguard"]["relays"]:
+    if r["active"] and "lwo" in r.get("features", {}) and r["location"] == "nl-ams":
+        print(r["ipv4_addr_in"], r["public_key"], "#", r["hostname"])'
+# 193.32.249.73 hf+klJbIyUoGUaFHgac9W+yriwb9uvSnafDfnmEW9Hc= # nl-ams-wg-008
 ```
 
-Get that relay's **WireGuard public key** from Mullvad's API:
-
-```sh
-curl -s "https://api.mullvad.net/app/v1/relays" \
- | python3 -c 'import sys,json;[print(r["public_key"]) for r in json.load(sys.stdin)["wireguard"]["relays"] if r["hostname"]=="nl-ams-wg-008"]'
-# e.g. hf+klJbIyUoGUaFHgac9W+yriwb9uvSnafDfnmEW9Hc=
-```
+The LWO **port** is not tied to the relay: LWO reuses the WireGuard endpoint, so any port in
+the API's WireGuard `port_ranges` works (e.g. `51820`, `33770`).
 
 So you now have: `server=193.32.249.73`, `server_port=33770`, `server_pubkey=<relay key>`.
 
@@ -270,7 +269,7 @@ Symptoms and fixes seen while getting this working end-to-end:
 | Handshake OK, but exit IP is still your real IP | traffic isn't routed into the tunnel | `ip route get 8.8.8.8` must show `dev wg_mullvad`; use the **split `/1` routes** from Step 4 |
 | Worked, then broke after `network restart` | netifd dropped a `0.0.0.0/0` wg default | use split `0.0.0.0/1` + `128.0.0.0/1` (survives restarts) |
 | Connected but ISP still sees your DNS | resolver still going out WAN | point dnsmasq at `10.64.0.1` + `noresolv=1` (Step 6) |
-| No handshake at all | wrong key direction, or LWO port rotated | `server_pubkey`=relay, `client_pubkey`=interface; recheck `mullvad status -v` for the current port |
+| No handshake at all | wrong key direction, or relay doesn't support LWO | `server_pubkey`=relay, `client_pubkey`=interface; check the relay has `features.lwo` in the relay API |
 
 **Key diagnostic commands**
 
@@ -337,6 +336,32 @@ field with a dropdown + **Switch / Next / Failover** buttons, and an **Auto fail
 on the same page: a plain text file with one `IP KEY [PORT]` per line (blank lines and `#`
 comments ignored). Relays whose IP is already listed are updated; tick **Replace the whole
 list** to start fresh. Then **Save & Apply**.
+
+**Automatic relay list per country.** Pick a **Country** on the Configuration page and press
+**Update relay list**. The router downloads that country's LWO relays from the Mullvad API,
+tests each one from your own connection and keeps only the ones that connect. Your ISP may
+block some relays or ports. If the active relay didn't pass, it switches to the first one that
+did. Choose how relays are tested with **Relay test mode** (`lwo.main.probe_mode`):
+
+- **Pause internet** (`switch`, default): no setup. The main tunnel moves to each relay for a
+  few seconds, then reconnects to the best one. Traffic is dropped while it tests, never leaked.
+- **Second device** (`device`): the internet stays up. Relays are tested on a temporary
+  `wg_probe` interface with a temporary `/32` route via WAN, using a **second Mullvad device
+  key**, so your main device never shows up on two relays at once.
+
+```sh
+uci set lwo.main.country='nl'
+# only for 'device' mode:
+#   wg genkey | tee /tmp/probe.key | wg pubkey   # add this public key to your account as a new device
+#   uci set lwo.main.probe_mode='device'
+#   uci set lwo.main.probe_private_key="$(cat /tmp/probe.key)"; rm /tmp/probe.key
+uci commit lwo
+lwo-switch update            # same as the LuCI button; progress in `logread -e lwo`
+```
+The update replaces the whole relay list with that country's working relays. It tests at most
+`max_relays` (default 20, a random pick, your current relay always included), needs LWO to be
+enabled and connected, and blocks Switch/Next/Failover while it runs. In **Pause internet** mode
+nothing is written to flash until the end, so a reboot mid-test comes back on your old relay.
 
 **No leak while switching.** `lwo-switch` swaps the WireGuard peer and the relay-bypass route
 live, without taking `wg_mullvad` down, so the tunnel routes stay in place. During the switch,

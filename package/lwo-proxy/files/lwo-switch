@@ -4,8 +4,8 @@
 #
 # Relays live as a UCI list in /etc/config/lwo, one entry per relay:
 #     list peer 'ENDPOINT_IP PUBLIC_KEY [PORT]'
-# PORT is optional and defaults to lwo.main.server_port (Mullvad LWO uses the
-# same port across relays, so usually you only need "IP KEY").
+# PORT is optional and defaults to lwo.main.server_port (any WireGuard port
+# works for LWO, so usually you only need "IP KEY").
 #
 # A switch updates the lwo proxy (server/pubkey/port) AND the kernel WireGuard
 # peer key + relay bypass route (live, without taking the wg interface down, so
@@ -22,6 +22,23 @@ config_get DEF_PORT main server_port   51820
 config_get ACTIVE   main active        ""
 
 msg() { echo "$@" >&2; }
+
+RUNFILE=/var/run/lwo-update.pid
+# True while an `update` owns the tunnel (its own final `use`, our parent, is let through).
+busy() {
+	local pid; pid="$(cat "$RUNFILE" 2>/dev/null)"
+	[ -n "$pid" ] && [ "$pid" != "$PPID" ] && [ "$pid" != "$$" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# How to reach a relay off-tunnel, built like netifd builds the bypass route from its config:
+# gateway (if any) + the WAN interface's device (PPPoE has no gateway, only pppoe-wan).
+wan_via() {
+	local gw iface dev
+	gw="$(uci -q get "network.$BYPASS.gateway")"
+	iface="$(uci -q get "network.$BYPASS.interface")"
+	[ -n "$iface" ] && dev="$(ifstatus "$iface" 2>/dev/null | jsonfilter -q -e '@.l3_device')"
+	echo "${gw:+via $gw }${dev:+dev $dev}"
+}
 
 PEERS=""
 _collect() { PEERS="${PEERS}$1
@@ -43,18 +60,20 @@ handshake_age() {
 	if [ -n "$hs" ] && [ "$hs" -gt 0 ] 2>/dev/null; then echo $((now - hs)); else echo 99999; fi
 }
 
-apply() { # ip key port
-	local old_ip lport aips ka gw p
+apply() { # ip key port [stage]
+	local old_ip lport aips ka via p
 	msg "switching to $1:$3"
 	old_ip="$(uci -q get lwo.main.server)"
+	via="$(wan_via)"
 	uci set lwo.main.server="$1"
 	uci set lwo.main.server_pubkey="$2"
 	uci set lwo.main.server_port="$3"
 	uci set lwo.main.active="$1"
-	uci commit lwo
 	uci set network.$WG_PEER.public_key="$2"
 	uci set network.$BYPASS.target="$1/32"
-	uci commit network
+	# 'stage' (relay tests) leaves the change uncommitted: the init script still reads it, but
+	# a reboot mid-test comes back on the last committed relay instead of a test relay.
+	[ "$4" = stage ] || { uci commit lwo; uci commit network; }
 
 	# Swap the peer and bypass route live instead of `ifup` (which does down+up and drops the
 	# wg routes, so LAN traffic leaks out WAN). The routes stay up: until the new relay
@@ -63,18 +82,26 @@ apply() { # ip key port
 		lport="$(uci -q get lwo.main.listen_port)"
 		aips="$(uci -q get network.$WG_PEER.allowed_ips | tr ' ' ',')"
 		ka="$(uci -q get network.$WG_PEER.persistent_keepalive)"
-		gw="$(uci -q get network.$BYPASS.gateway)"
-		[ -n "$gw" ] && ip route replace "$1/32" via "$gw"
-		[ -n "$old_ip" ] && [ "$old_ip" != "$1" ] && ip route del "$old_ip/32" 2>/dev/null
+		[ -n "$via" ] && ip route replace "$1/32" $via
+		# Proxy first, then the peer: wg sends its first handshake the moment the peer is set,
+		# and it must reach the new proxy, not the one being restarted (else a ~5s retry).
+		/etc/init.d/lwo restart
+		sleep 1
 		for p in $(wg show "$WG_IFACE" peers); do
 			[ "$p" = "$2" ] || wg set "$WG_IFACE" peer "$p" remove
 		done
 		wg set "$WG_IFACE" peer "$2" endpoint "127.0.0.1:${lport:-51820}" \
 			allowed-ips "$aips" ${ka:+persistent-keepalive "$ka"}
+		[ -n "$via" ] && [ -n "$old_ip" ] && [ "$old_ip" != "$1" ] && ip route del "$old_ip/32" 2>/dev/null
+		# Let netifd pick up the committed bypass route, or it re-adds the OLD relay's /32 on the
+		# next WAN reconnect and the proxy loops into the tunnel. A peer-only change does not
+		# restart wg_mullvad (netifd only diffs interface sections).
+		[ "$4" = stage ] || ubus call network reload
 	else
 		ifup "$WG_IFACE"
+		/etc/init.d/lwo restart
 	fi
-	/etc/init.d/lwo restart
+	return 0
 }
 
 verify() {
@@ -89,7 +116,9 @@ verify() {
 }
 
 use_ip() {
-	local rec; rec="$(find_peer "$1")"
+	local rec
+	busy && { msg "a relay update is running; try again when it finishes"; return 1; }
+	rec="$(find_peer "$1")"
 	[ -n "$rec" ] || { msg "no relay with IP '$1' in lwo.main.peer"; return 1; }
 	apply $rec && verify
 }
@@ -108,13 +137,190 @@ next_ip() {
 }
 
 failover() {
-	local age; age="$(handshake_age)"
+	local age
+	busy && { msg "relay update running; no action"; return 0; }
+	age="$(handshake_age)"
 	[ "$age" -lt "$HS_MAX" ] && { msg "healthy (${age}s ago); no action"; return 0; }
 	msg "tunnel stale (${age}s ago); trying relays in order..."
 	for ip in $(peer_ips); do
 		apply $(find_peer "$ip") && verify && { msg "failed over to $ip"; return 0; }
 	done
 	msg "all relays failed"; return 1
+}
+
+# --- relay list from the Mullvad API + reachability probe ---------------------
+
+CACHE=/tmp/lwo-relays.json
+PROBE_IF=wg_probe
+config_get PROBE_WAIT main probe_timeout 6
+config_get MAX_RELAYS main max_relays 20
+
+fetch_relays() {
+	# grep: never cache a captive-portal page or error body as the relay list
+	uclient-fetch -q -T 30 -O "$CACHE.tmp" https://api.mullvad.net/app/v1/relays &&
+		grep -q '"wireguard"' "$CACHE.tmp" && mv "$CACHE.tmp" "$CACHE" && return 0
+	rm -f "$CACHE.tmp"
+	msg "could not download the relay list from api.mullvad.net"
+	return 1
+}
+
+relays() { # countries -> "cc Name" lines | <cc> -> "IP KEY" lines of active LWO relays
+	[ -s "$CACHE" ] || fetch_relays || return 1
+	F="$CACHE" C="$1" ucode -e '
+let d = json(require("fs").readfile(getenv("F")));
+let want = getenv("C"), seen = {};
+for (let r in d.wireguard.relays) {
+	if (!r.active || !r.features || !exists(r.features, "lwo")) continue;
+	let cc = split(r.location, "-")[0];
+	if (want == "countries") seen[cc] = (d.locations[r.location] || {}).country || cc;
+	else if (cc == want) print(r.ipv4_addr_in, " ", r.public_key, "\n");
+}
+for (let cc in sort(keys(seen))) print(cc, " ", seen[cc], "\n");
+'
+}
+
+probe_stop() {
+	[ -n "$PROBE_PID" ] && kill "$PROBE_PID" 2>/dev/null
+	[ -n "$PROBE_IP" ] && ip route del "$PROBE_IP/32" 2>/dev/null
+	PROBE_PID="" PROBE_IP=""
+	ip link del "$PROBE_IF" 2>/dev/null
+}
+
+# The probe uses its own key, registered as a separate device on the Mullvad account, so
+# probing never looks like one device connected to many relays at once.
+probe_start() {
+	local pk; pk="$(uci -q get lwo.main.probe_private_key)"
+	[ -n "$pk" ] || { msg "set lwo.main.probe_private_key (a second Mullvad device key) first"; return 1; }
+	PROBE_PUB="$(printf '%s\n' "$pk" | wg pubkey)" || return 1
+	probe_stop
+	ip link add "$PROBE_IF" type wireguard || return 1
+	printf '%s\n' "$pk" | wg set "$PROBE_IF" private-key /dev/stdin || return 1
+	ip link set "$PROBE_IF" up
+}
+
+# Handshake with one relay over WAN through a throwaway LWO proxy + wg interface. The main
+# tunnel is untouched; the temporary /32 route makes the probe take the real ISP path
+# instead of going through the tunnel.
+probe() { # ip key
+	local lport mark i=0 hs rc=1
+	lport=$(( $(uci -q get lwo.main.listen_port || echo 51820) + 1 ))
+	mark="$(uci -q get lwo.main.fwmark)"
+	[ -n "$WAN_VIA" ] && ip route replace "$1/32" $WAN_VIA || return 1
+	PROBE_IP="$1"
+	/usr/sbin/lwo-proxy --listen "127.0.0.1:$lport" --server "$1:$DEF_PORT" --server-pubkey "$2" \
+		--client-pubkey "$PROBE_PUB" ${mark:+--fwmark "$mark"} \
+		--no-reconnect --log-level error &
+	PROBE_PID=$!
+	sleep 1
+	wg set "$PROBE_IF" peer "$2" endpoint "127.0.0.1:$lport" allowed-ips 10.64.0.1/32 persistent-keepalive 1
+	while [ $i -lt "$PROBE_WAIT" ]; do
+		hs="$(wg show "$PROBE_IF" latest-handshakes | awk '{print $2}')"
+		[ "${hs:-0}" -gt 0 ] && { rc=0; break; }
+		i=$((i + 1)); sleep 1
+	done
+	wg set "$PROBE_IF" peer "$2" remove
+	kill "$PROBE_PID" 2>/dev/null; wait "$PROBE_PID" 2>/dev/null
+	ip route del "$1/32" 2>/dev/null
+	PROBE_PID="" PROBE_IP=""
+	return $rc
+}
+
+# probe_mode 'switch' (default): the main tunnel itself is moved to each relay in turn, so
+# no second device is needed but the internet pauses (dropped, never leaked) during the test.
+# probe_mode 'device': a second device key probes on wg_probe while the tunnel stays up.
+# Switch mode: drop the staged test relay and go back to the relay that was live before the
+# test (also run from the EXIT trap if the update is killed mid-test).
+restore_switch() {
+	PROBING=0
+	uci -q revert lwo; uci -q revert network
+	apply "$SRV" "$SRV_KEY" "$SRV_PORT" 2>/dev/null
+	drop_test_routes "$SRV"
+}
+
+# Remove the /32 WAN routes that switch-mode tests added, except the relay we stay on.
+drop_test_routes() { # keep_ip
+	local ip key
+	printf '%s\n' "$LIST" | while read -r ip key; do
+		[ -n "$ip" ] && [ "$ip" != "$1" ] && ip route del "$ip/32" 2>/dev/null
+	done
+}
+
+update() { # [country code] -> replace lwo.main.peer with that country's relays reachable from here
+	local cc mode srv_ok=1 target ok="" n=0 total=0 ip key
+	cc="$(printf '%s' "${1:-$(uci -q get lwo.main.country)}" | tr 'A-Z' 'a-z')"
+	[ -n "$cc" ] || { msg "no country set (lwo.main.country)"; return 1; }
+	busy && { msg "an update is already running"; return 1; }
+	# Refuse unless LWO is really running: restoring an empty relay would wipe a plain-WG peer.
+	[ "$(uci -q get lwo.main.enabled)" = 1 ] && [ -n "$(uci -q get lwo.main.server)" ] &&
+		[ -n "$(uci -q get lwo.main.server_pubkey)" ] && wg show "$WG_IFACE" >/dev/null 2>&1 ||
+		{ msg "enable LWO and connect to a relay first"; return 1; }
+	echo $$ > "$RUNFILE"
+	PROBING=0
+	trap 'probe_stop; [ "$PROBING" = 1 ] && restore_switch; rm -f "$RUNFILE"' EXIT
+	trap 'exit 1' INT TERM
+
+	msg "updating relays for '$cc'..."
+	fetch_relays || { [ -s "$CACHE" ] && msg "using the cached relay list"; } || return 1
+	SRV="$(uci -q get lwo.main.server)"
+	WAN_VIA="$(wan_via)"
+	# At most max_relays, in random order (spread over cities), current relay first.
+	LIST="$(relays "$cc" | awk -v s="$SRV" 'BEGIN { srand() } { print ($1 == s ? 0 : rand()) "\t" $0 }' |
+		sort -n | cut -f2- | head -n "$MAX_RELAYS")" || return 1
+	[ -n "$LIST" ] || { msg "no active LWO relays for '$cc'"; return 1; }
+	SRV_KEY="$(uci -q get lwo.main.server_pubkey)"
+	SRV_PORT="$(uci -q get lwo.main.server_port)"
+	[ "$(handshake_age)" -lt "$HS_MAX" ] && srv_ok=0
+	mode="$(uci -q get lwo.main.probe_mode)"
+	if [ "$mode" = device ]; then
+		probe_start || { msg "could not start the probe interface $PROBE_IF"; return 1; }
+	else
+		mode=switch
+		msg "testing on the main tunnel: internet pauses for a few seconds per relay"
+		PROBING=1
+	fi
+
+	while read -r ip key; do
+		total=$((total + 1))
+		# The active relay isn't probed (its /32 bypass route is in use); the main tunnel's
+		# handshake from before the test already says whether it works.
+		if [ "$ip" = "$SRV" ]; then
+			[ "$srv_ok" = 0 ]
+		elif [ "$mode" = device ]; then
+			probe "$ip" "$key"
+		else
+			apply "$ip" "$key" "$DEF_PORT" stage 2>/dev/null && verify "$PROBE_WAIT" 2>/dev/null
+		fi
+		if [ $? -eq 0 ]; then
+			ok="$ok$ip $key
+"; n=$((n + 1)); msg "  ok    $ip"
+		else
+			msg "  fail  $ip"
+		fi
+	done <<-EOF
+	$LIST
+	EOF
+	probe_stop
+
+	if [ "$n" -eq 0 ]; then
+		msg "no $cc relay is reachable from here; relay list left unchanged"
+		[ "$mode" = switch ] && restore_switch
+		return 1
+	fi
+	if [ "$mode" = switch ]; then
+		PROBING=0
+		uci -q revert lwo; uci -q revert network
+	fi
+	uci -q delete lwo.main.peer
+	printf '%s' "$ok" | while read -r ip key; do uci add_list lwo.main.peer="$ip $key"; done
+	uci set lwo.main.country="$cc"
+	uci commit lwo
+	msg "kept $n of $total $cc relays"
+	# Stay on (or, in switch mode, go back to) the old relay if it passed; else take the first.
+	target="$SRV"
+	printf '%s' "$ok" | cut -d' ' -f1 | grep -qxF "$SRV" || target="$(printf '%s' "$ok" | head -n1 | cut -d' ' -f1)"
+	[ "$mode" = switch ] || [ "$target" != "$SRV" ] && "$0" use "$target"
+	[ "$mode" = switch ] && drop_test_routes "$target"
+	return 0
 }
 
 list_peers() {
@@ -133,6 +339,10 @@ case "${1:-list}" in
 	next)     next_ip ;;
 	check)    age="$(handshake_age)"; msg "handshake ${age}s ago"; [ "$age" -lt "$HS_MAX" ] ;;
 	failover) failover ;;
+	update)   update "$2" ;;
+	countries)
+		# Called on every LuCI page load: only download when the tunnel works, else use the cache.
+		[ -s "$CACHE" ] || [ "$(handshake_age)" -lt "$HS_MAX" ] && relays countries ;;
 	watch)
 		# Background scheduler used by /etc/init.d/lwo-failover: sleep first (so a
 		# restart never busy-loops), then run one failover check, forever.
@@ -143,5 +353,5 @@ case "${1:-list}" in
 			"$0" failover
 		done
 		;;
-	*) msg "usage: lwo-switch {list | use <ip> | next | check | failover | watch}"; exit 2 ;;
+	*) msg "usage: lwo-switch {list | use <ip> | next | check | failover | update [cc] | countries | watch}"; exit 2 ;;
 esac
