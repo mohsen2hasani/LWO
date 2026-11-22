@@ -371,18 +371,45 @@ live, without taking `wg_mullvad` down, so the tunnel routes stay in place. Duri
 traffic goes into the tunnel and is dropped until the new relay handshakes. It never falls back
 to WAN.
 
-## Upgrading OpenWrt (sysupgrade)
+## Upgrading OpenWrt
 
-These packages aren't in the official feeds, so you have to exclude them from Attended
-Sysupgrade / `owut`. The packages ship `/lib/upgrade/keep.d` entries, so `sysupgrade` keeps
-their files, the service-enable links and the feed key/repo line. After the upgrade, LWO comes
-back on first boot and you keep internet access. Then re-register the packages so `apk` tracks
-them again:
+LWO isn't in the official OpenWrt feeds, so the firmware upgrade can't include it. Instead, the
+router keeps LWO's files through the upgrade, and you re-install the packages afterwards. You
+need LWO **1.2.0 or newer** installed before you start.
+
+**1. Before: check that LWO's files will be kept.**
+```sh
+sysupgrade -l | grep lwo
+```
+You should see `/usr/sbin/lwo-proxy`, `/usr/sbin/lwo-switch` and `/etc/rc.d/S90lwo` among others.
+If the list is empty, don't upgrade. Update LWO first.
+
+**2. Upgrade, leaving out the two LWO packages.** Keep your settings.
+```sh
+owut upgrade -r lwo-proxy,luci-app-mullvad-lwo
+```
+If you use LuCI's **Attended Sysupgrade** page instead, remove the two LWO packages from its
+package list and keep **Keep settings** ticked.
+
+**3. After the reboot: check the tunnel.**
+```sh
+lwo-switch check
+uclient-fetch -4 -q -O - https://am.i.mullvad.net/connected
+```
+
+**4. Re-install the packages**, so `apk` tracks them and you get future updates:
 ```sh
 apk update && apk add lwo-proxy luci-app-mullvad-lwo
 ```
-This needs the new firmware to include `kmod-wireguard` and `wireguard-tools`, and LWO must
-be at v1.2.0+ *before* you upgrade.
+You can also do this in **System → Software**: **Update lists**, filter `lwo`, then install both.
+
+**If there's no internet after the reboot**, turn the tunnel off for a moment, reinstall, and
+turn it back on. While the tunnel is off, traffic uses your real IP:
+```sh
+ifdown wg_mullvad; uci -q delete dhcp.@dnsmasq[0].server; uci set dhcp.@dnsmasq[0].noresolv=0; service dnsmasq restart
+apk update && apk add lwo-proxy luci-app-mullvad-lwo
+uci revert dhcp; service dnsmasq restart; ifup wg_mullvad
+```
 
 ## Quick start (if WireGuard is already set up)
 
