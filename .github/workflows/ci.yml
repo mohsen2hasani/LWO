@@ -50,9 +50,9 @@ jobs:
       # Building rust/host (the Rust compiler) from source needs ~10-15 GB;
       # reclaim space a stock runner doesn't have free.
       - name: Free up disk space
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@v2.0.0
         with:
-          tool-cache: true
+          preinstalled-runtimes: true
           android: true
           dotnet: true
           haskell: true
@@ -77,7 +77,7 @@ jobs:
             \( -name '*.apk' -o -name '*.ipk' \) -exec cp -v {} artifacts/ \;
           ls -l artifacts/
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: packages-${{ matrix.arch }}
           path: artifacts/*
