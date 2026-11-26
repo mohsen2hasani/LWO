@@ -79,13 +79,14 @@ method_lwo_switch() {
 }
 
 method_countries() {
-	local code name
+	local code region name
 	json_init
 	json_add_array countries
-	while read -r code name; do
+	while read -r code region name; do
 		[ -n "$code" ] || continue
 		json_add_object ""
 		json_add_string code "$code"
+		json_add_string region "$region"
 		json_add_string name "$name"
 		json_close_object
 	done <<-EOF

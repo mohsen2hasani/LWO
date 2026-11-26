@@ -16,6 +16,18 @@ var callSwitch   = rpc.declare({ object: 'luci.lwo', method: 'switch',   params:
 var callUpdate   = rpc.declare({ object: 'luci.lwo', method: 'update',   params: [ 'country' ] });
 var callCountries = rpc.declare({ object: 'luci.lwo', method: 'countries', expect: { countries: [] } });
 
+// Region codes understood by `lwo-switch update`, in display order.
+var REGIONS = [
+	[ 'europe', _('Europe') ],
+	[ 'north-america', _('North America') ],
+	[ 'south-america', _('South America') ],
+	[ 'asia', _('Asia') ],
+	[ 'oceania', _('Oceania') ],
+	[ 'middle-east', _('Middle East') ],
+	[ 'africa', _('Africa') ],
+	[ 'other', _('Other') ]
+];
+
 function btn(label, cls, fn) {
 	return E('button', {
 		'class': 'btn cbi-button ' + cls,
@@ -154,12 +166,40 @@ return view.extend({
 		o.default = 'info';
 
 		// The relay pool — one row per relay: "IP KEY [PORT]".
-		o = s.option(form.Value, 'country', _('Country'),
-			_('Relays of this country are fetched from the Mullvad API by <em>Update relay list</em> ' +
-			  'below. Only countries with LWO relays are listed.'));
-		countries.forEach(function(c) { o.value(c.code, '%s (%s)'.format(c.name, c.code)); });
+		o = s.option(form.Value, 'country', _('Country or region'),
+			_('Relays of this country, region or of all countries are fetched from the Mullvad API by ' +
+			  '<em>Update relay list</em> below. A region tests the relays with the best ping across ' +
+			  'its countries, so it usually finds faster relays than one country. Only countries ' +
+			  'with LWO relays are listed.'));
+		o.value('all', _('All countries (fastest anywhere)'));
+		REGIONS.forEach(function(r) {
+			var list = countries.filter(function(c) { return (c.region || 'other') === r[0]; });
+			if (!list.length) return;
+			o.value(r[0], _('%s: all countries').format(r[1]));
+			list.forEach(function(c) {
+				o.value(c.code, '%s / %s (%s)'.format(r[1], c.name, c.code));
+			});
+		});
 		o.placeholder = 'nl';
 		countryOpt = o;
+
+		o = s.option(form.Flag, 'fallback_any', _('Fall back to any country'),
+			_('If no relay of the chosen country or region works (or passes the access check), ' +
+			  'use the fastest working relay anywhere. The choice above is kept, so the next ' +
+			  'update tries it first again. With auto failover on, an update also runs when every ' +
+			  'listed relay is down (at most every 15 minutes).'));
+
+		o = s.option(form.Flag, 'access_check', _('Access check'),
+			_('After a relay connects, send real traffic through it: data must pass, and the sites ' +
+			  'below must not answer 403, 429, nothing, or a "blocked" / "not available in your ' +
+			  'country" page. A Cloudflare browser check is not counted as a block. Relays that ' +
+			  'fail are dropped. Needs <code>curl</code>.'));
+
+		o = s.option(form.DynamicList, 'access_url', _('Access check sites'),
+			_('Leave empty for the defaults: claude.ai, api.anthropic.com, Gemini, Google search ' +
+			  'and cloudflare.com.'));
+		o.placeholder = 'https://claude.ai/login';
+		o.depends('access_check', '1');
 
 		o = s.option(form.ListValue, 'probe_mode', _('Relay test mode'),
 			_('How <em>Update relay list</em> tests relays. <strong>Pause internet</strong> uses this ' +
@@ -176,6 +216,12 @@ return view.extend({
 			  'and add its public key (<code>wg pubkey</code>) to your Mullvad account as a new device.'));
 		o.password = true;
 		o.depends('probe_mode', 'device');
+
+		o = s.option(form.Value, 'probe_address', _('Probe tunnel address'),
+			_('The <code>Address</code> of that second device in its Mullvad WireGuard config ' +
+			  '(e.g. <code>10.66.12.34</code>). Needed only for the access check.'));
+		o.datatype = 'ip4addr';
+		o.depends({ probe_mode: 'device', access_check: '1' });
 
 		o = s.option(form.DynamicList, 'peer', _('Relays'),
 			_('Candidate Mullvad relays, one per row: ' +

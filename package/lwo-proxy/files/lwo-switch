@@ -145,7 +145,20 @@ failover() {
 	for ip in $(peer_ips); do
 		apply $(find_peer "$ip") && verify && { msg "failed over to $ip"; return 0; }
 	done
-	msg "all relays failed"; return 1
+	msg "all relays failed"
+	# Optional: search the configured country/region again and, if nothing works there, the
+	# fastest relay anywhere (see update). At most once per FALLBACK_GAP so a dead WAN does not
+	# keep the router probing relays every failover interval.
+	if [ "$FALLBACK" = 1 ]; then
+		local now last
+		now="$(date +%s)"; last="$(cat "$FALLBACK_TS" 2>/dev/null || echo 0)"
+		if [ $((now - last)) -ge "$FALLBACK_GAP" ]; then
+			echo "$now" > "$FALLBACK_TS"
+			msg "searching for a working relay (fallback)..."
+			"$0" update && return 0
+		fi
+	fi
+	return 1
 }
 
 # --- relay list from the Mullvad API + reachability probe ---------------------
@@ -155,6 +168,31 @@ PROBE_IF=wg_probe
 config_get PROBE_WAIT main probe_timeout 6
 config_get MAX_RELAYS main max_relays 20
 config_get RANK_PINGS main rank_pings 15
+# Regions/'all': at most this many relays per country are pre-ranked by ping, the best
+# max_relays of those are tested.
+config_get PER_COUNTRY main region_per_country 3
+config_get_bool FALLBACK main fallback_any 0
+FALLBACK_TS=/tmp/lwo-fallback.ts
+FALLBACK_GAP=900
+
+# Access check (optional): a relay must pass data and must not be blocked by these sites.
+config_get_bool ACCESS main access_check 0
+config_get PROBE_ADDR main probe_address ""
+config_get ACC_DATA main access_data_url "https://www.yahoo.com/"
+config_get ACC_BLOCK main access_block_regex \
+	"you have been blocked|unavailable-in-region|not available in your (country|region)|not supported in your country|isn.t currently supported in your|unusual traffic|/sorry/"
+ACC_URLS=""
+_acc() { ACC_URLS="${ACC_URLS}$1
+"; }
+config_list_foreach main access_url _acc
+[ -n "$ACC_URLS" ] || ACC_URLS="https://claude.ai/login
+https://api.anthropic.com/v1/models
+https://gemini.google.com/app
+https://www.google.com/search?q=weather
+https://www.cloudflare.com/
+"
+ACC_TABLE=51822
+ACC_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 
 fetch_relays() {
 	# grep: never cache a captive-portal page or error body as the relay list
@@ -165,16 +203,38 @@ fetch_relays() {
 	return 1
 }
 
-relays() { # countries -> "cc Name" lines | <cc> -> "IP KEY" lines of active LWO relays
+# A target is a country code ('nl'), a region ('europe', 'asia', ...) or 'all'.
+# The Mullvad API has no continents, so the region of each country is listed here.
+relays() { # countries -> "cc region Name" lines | <target> -> "IP KEY" lines of active LWO relays
 	[ -s "$CACHE" ] || fetch_relays || return 1
-	F="$CACHE" C="$1" ucode -e '
+	F="$CACHE" C="$1" P="$PER_COUNTRY" ucode -e '
+let REG = {
+	"europe": "ad al at ba be bg by ch cy cz de dk ee es fi fr gb gr hr hu ie is it li lt lu lv md me mk mt nl no pl pt ro rs se si sk tr ua",
+	"north-america": "ca mx us",
+	"south-america": "ar bo br cl co ec pe py uy ve",
+	"asia": "bd hk id in jp kh kr kz lk my ph sg th tw vn",
+	"oceania": "au nz",
+	"middle-east": "ae bh il jo kw qa sa",
+	"africa": "eg gh ke ma ng za"
+};
+let region = {};
+for (let rg in REG) for (let c in split(REG[rg], " ")) region[c] = rg;
 let d = json(require("fs").readfile(getenv("F")));
-let want = getenv("C"), seen = {};
+let want = getenv("C"), cap = int(getenv("P") || "0"), seen = {}, n = {};
 for (let r in d.wireguard.relays) {
 	if (!r.active || !r.features || !exists(r.features, "lwo")) continue;
-	let cc = split(r.location, "-")[0];
-	if (want == "countries") seen[cc] = (d.locations[r.location] || {}).country || cc;
-	else if (cc == want) print(r.ipv4_addr_in, " ", r.public_key, "\n");
+	let cc = split(r.location, "-")[0], rg = region[cc] || "other";
+	if (want == "countries") {
+		seen[cc] = rg + " " + ((d.locations[r.location] || {}).country || cc);
+		continue;
+	}
+	if (want != cc && want != rg && want != "all") continue;
+	// regions and "all": a few relays per country, so every country gets a fair chance
+	if (want != cc && cap > 0) {
+		n[cc] = (n[cc] || 0) + 1;
+		if (n[cc] > cap) continue;
+	}
+	print(r.ipv4_addr_in, " ", r.public_key, "\n");
 }
 for (let cc in sort(keys(seen))) print(cc, " ", seen[cc], "\n");
 '
@@ -196,7 +256,63 @@ probe_start() {
 	probe_stop
 	ip link add "$PROBE_IF" type wireguard || return 1
 	printf '%s\n' "$pk" | wg set "$PROBE_IF" private-key /dev/stdin || return 1
+	# The probe device's tunnel address (from its Mullvad config) lets the access check
+	# send real traffic through the probe tunnel.
+	[ "$ACCESS" = 1 ] && ip addr add "${PROBE_ADDR%/*}/32" dev "$PROBE_IF"
 	ip link set "$PROBE_IF" up
+}
+
+# --- access check: does real traffic pass, and do common sites answer without a block? ---
+
+access_cleanup() {
+	ip rule del priority "$ACC_TABLE" 2>/dev/null
+	ip route flush table "$ACC_TABLE" 2>/dev/null
+	rm -f /tmp/lwo-acc.h /tmp/lwo-acc.b
+}
+
+acc_curl() { # iface curl-args... (traffic is bound to the tunnel interface)
+	local ifc="$1"; shift
+	# -4: the tunnel has no IPv6 address, don't spend the timeout trying it
+	curl -4 -s -m 15 --interface "$ifc" -A "$ACC_UA" -H 'Accept-Language: en-US' "$@"
+}
+
+# Route traffic from the tunnel's own address out of that tunnel (a private table, so the
+# rest of the router is untouched), then: data must pass (3 tries), and no site in
+# access_url may answer 403 (a Cloudflare browser challenge is not a block), 429, nothing,
+# or a page matching access_block_regex.
+access_ok() { # iface src_ip
+	local ifc="$1" src="$2" i c h u r res="" bad=0
+	access_cleanup
+	ip route replace default dev "$ifc" table "$ACC_TABLE" &&
+		ip rule add from "$src" lookup "$ACC_TABLE" priority "$ACC_TABLE" || return 1
+	# Any HTTP answer proves data passes (sites rate-limit scripts, e.g. Yahoo answers 429).
+	c=""
+	for i in 1 2 3; do
+		c="$(acc_curl "$ifc" -o /dev/null -w '%{http_code}' "$ACC_DATA")"
+		case "$c" in [1-5][0-9][0-9]) break ;; esac
+		c=""; sleep 2
+	done
+	if [ -z "$c" ]; then
+		msg "    no data passes through the tunnel"
+		access_cleanup; return 1
+	fi
+	while read -r u; do
+		[ -n "$u" ] || continue
+		h="$(acc_curl "$ifc" -L -D /tmp/lwo-acc.h -o /tmp/lwo-acc.b -w '%{http_code}|%{url_effective}' "$u")"
+		c="${h%%|*}"; r="$c"
+		case "$c" in
+			403) grep -qi '^cf-mitigated: *challenge' /tmp/lwo-acc.h && r="403-challenge" || bad=1 ;;
+			429|000|"") bad=1 ;;
+		esac
+		{ grep -qiE "$ACC_BLOCK" /tmp/lwo-acc.b 2>/dev/null || echo "${h#*|}" | grep -qiE "$ACC_BLOCK"; } &&
+			{ r="$r-blocked"; bad=1; }
+		res="$res $(echo "$u" | sed 's|^[a-z]*://||; s|[/?].*||')=$r"
+	done <<-EOF
+	$ACC_URLS
+	EOF
+	access_cleanup
+	msg "    access:$res"
+	return $bad
 }
 
 # Handshake with one relay over WAN through a throwaway LWO proxy + wg interface. The main
@@ -213,12 +329,13 @@ probe() { # ip key
 		--no-reconnect --log-level error &
 	PROBE_PID=$!
 	sleep 1
-	wg set "$PROBE_IF" peer "$2" endpoint "127.0.0.1:$lport" allowed-ips 10.64.0.1/32 persistent-keepalive 1
+	wg set "$PROBE_IF" peer "$2" endpoint "127.0.0.1:$lport" allowed-ips 0.0.0.0/0 persistent-keepalive 1
 	while [ $i -lt "$PROBE_WAIT" ]; do
 		hs="$(wg show "$PROBE_IF" latest-handshakes | awk '{print $2}')"
 		[ "${hs:-0}" -gt 0 ] && { rc=0; break; }
 		i=$((i + 1)); sleep 1
 	done
+	[ $rc -eq 0 ] && [ "$ACCESS" = 1 ] && { access_ok "$PROBE_IF" "${PROBE_ADDR%/*}" || rc=1; }
 	wg set "$PROBE_IF" peer "$2" remove
 	kill "$PROBE_PID" 2>/dev/null; wait "$PROBE_PID" 2>/dev/null
 	ip route del "$1/32" 2>/dev/null
@@ -232,8 +349,8 @@ probe() { # ip key
 # Order working relays (IP KEY lines) best-first by packet loss, then latency, measured over
 # plain WAN (the ISP path is what limits speed). All relays are pinged at once through
 # temporary /32 routes; routes that already exist (the live relay) are left alone.
-rank() {
-	local ip key dir out loss rtt
+rank() { # "IP KEY" lines [pings] [quiet]
+	local ip key dir out loss rtt pings="${2:-$RANK_PINGS}" quiet="$3"
 	[ -n "$WAN_VIA" ] || { printf '%s' "$1"; return; }
 	dir=/tmp/lwo-rank; rm -rf "$dir"; mkdir -p "$dir"
 	while read -r ip key; do
@@ -241,7 +358,7 @@ rank() {
 		if [ -z "$(ip -4 route show "$ip/32" 2>/dev/null)" ]; then
 			ip route replace "$ip/32" $WAN_VIA && RANK_ROUTES="$RANK_ROUTES $ip"
 		fi
-		ping -c "$RANK_PINGS" -W 1 "$ip" > "$dir/$ip" 2>/dev/null &
+		ping -c "$pings" -W 1 "$ip" > "$dir/$ip" 2>/dev/null &
 	done <<-EOF
 	$1
 	EOF
@@ -252,7 +369,7 @@ rank() {
 		out="$(cat "$dir/$ip" 2>/dev/null)"
 		loss="$(echo "$out" | sed -n 's/.* \([0-9]*\)% packet loss.*/\1/p')"
 		rtt="$(echo "$out" | sed -n 's|.*= [0-9.]*/\([0-9]*\)[.0-9]*/.*|\1|p')"
-		msg "  rank  $ip loss=${loss:-100}% rtt=${rtt:-?}ms"
+		[ -n "$quiet" ] || msg "  rank  $ip loss=${loss:-100}% rtt=${rtt:-?}ms"
 		printf '%03d %05d %s %s\n' "${loss:-100}" "${rtt:-99999}" "$ip" "$key"
 	done | sort | cut -d' ' -f3-
 	rm -rf "$dir"
@@ -276,13 +393,59 @@ restore_switch() {
 # Remove the /32 WAN routes that switch-mode tests added, except the relay we stay on.
 drop_test_routes() { # keep_ip
 	local ip key
-	printf '%s\n' "$LIST" | while read -r ip key; do
+	printf '%s\n' "$TESTED" | while read -r ip key; do
 		[ -n "$ip" ] && [ "$ip" != "$1" ] && ip route del "$ip/32" 2>/dev/null
 	done
 }
 
-update() { # [country code] -> replace lwo.main.peer with that country's relays reachable from here
-	local cc mode srv_ok=1 target ok="" n=0 total=0 ip key
+# Pick the candidates of one target, test them, and set OK / N / TOTAL to the working ones.
+test_relays() { # target
+	local all count ip key
+	OK=""; N=0; TOTAL=0
+	all="$(relays "$1")" || return 1
+	[ -n "$all" ] || { msg "no active LWO relays for '$1'"; return 1; }
+	count="$(printf '%s\n' "$all" | grep -c .)"
+	if [ "$count" -gt "$MAX_RELAYS" ] && [ -n "$WAN_VIA" ] && [ "${#1}" -gt 2 ]; then
+		# A region or 'all': too many to test one by one, so test the ones with the best ping.
+		msg "pre-ranking $count relays in '$1' by ping (~5s)..."
+		all="$(rank "$all" 5 quiet)"
+	else
+		# One country: random order (spread over cities).
+		all="$(printf '%s\n' "$all" | awk 'BEGIN { srand() } { print rand() "\t" $0 }' | sort -n | cut -f2-)"
+	fi
+	# At most max_relays, current relay first.
+	LIST="$(printf '%s\n' "$all" | awk -v s="$SRV" '$1 == s { print; next } { r[++n] = $0 }
+		END { for (i = 1; i <= n; i++) print r[i] }' | head -n "$MAX_RELAYS")"
+	TESTED="$TESTED$LIST
+"
+
+	while read -r ip key; do
+		[ -n "$ip" ] || continue
+		TOTAL=$((TOTAL + 1))
+		# The active relay isn't probed (its /32 bypass route is in use); the main tunnel's
+		# handshake from before the test already says whether it works.
+		if [ "$ip" = "$SRV" ]; then
+			[ "$SRV_OK" = 0 ] && { [ "$ACCESS" != 1 ] || access_ok "$WG_IFACE" "$MAIN_ADDR"; }
+		elif [ "$MODE" = device ]; then
+			probe "$ip" "$key"
+		else
+			apply "$ip" "$key" "$DEF_PORT" stage 2>/dev/null && verify "$PROBE_WAIT" 2>/dev/null &&
+				{ [ "$ACCESS" != 1 ] || access_ok "$WG_IFACE" "$MAIN_ADDR"; }
+		fi
+		if [ $? -eq 0 ]; then
+			OK="$OK$ip $key
+"; N=$((N + 1)); msg "  ok    $ip"
+		else
+			msg "  fail  $ip"
+		fi
+	done <<-EOF
+	$LIST
+	EOF
+	[ "$N" -gt 0 ]
+}
+
+update() { # [country | region | all] -> replace lwo.main.peer with the working relays of that target
+	local cc target used
 	cc="$(printf '%s' "${1:-$(uci -q get lwo.main.country)}" | tr 'A-Z' 'a-z')"
 	[ -n "$cc" ] || { msg "no country set (lwo.main.country)"; return 1; }
 	busy && { msg "an update is already running"; return 1; }
@@ -292,72 +455,69 @@ update() { # [country code] -> replace lwo.main.peer with that country's relays 
 		{ msg "enable LWO and connect to a relay first"; return 1; }
 	echo $$ > "$RUNFILE"
 	PROBING=0
-	trap 'probe_stop; rank_cleanup; [ "$PROBING" = 1 ] && restore_switch; rm -f "$RUNFILE"' EXIT
+	trap 'probe_stop; rank_cleanup; access_cleanup; [ "$PROBING" = 1 ] && restore_switch; rm -f "$RUNFILE"' EXIT
 	trap 'exit 1' INT TERM
 
 	msg "updating relays for '$cc'..."
 	fetch_relays || { [ -s "$CACHE" ] && msg "using the cached relay list"; } || return 1
 	SRV="$(uci -q get lwo.main.server)"
 	WAN_VIA="$(wan_via)"
-	# At most max_relays, in random order (spread over cities), current relay first.
-	LIST="$(relays "$cc" | awk -v s="$SRV" 'BEGIN { srand() } { print ($1 == s ? 0 : rand()) "\t" $0 }' |
-		sort -n | cut -f2- | head -n "$MAX_RELAYS")" || return 1
-	[ -n "$LIST" ] || { msg "no active LWO relays for '$cc'"; return 1; }
 	SRV_KEY="$(uci -q get lwo.main.server_pubkey)"
 	SRV_PORT="$(uci -q get lwo.main.server_port)"
-	[ "$(handshake_age)" -lt "$HS_MAX" ] && srv_ok=0
-	mode="$(uci -q get lwo.main.probe_mode)"
-	if [ "$mode" = device ]; then
+	SRV_OK=1; [ "$(handshake_age)" -lt "$HS_MAX" ] && SRV_OK=0
+	MAIN_ADDR="$(uci -q get "network.$WG_IFACE.addresses" | awk '{ sub("/.*", "", $1); print $1 }')"
+	MODE="$(uci -q get lwo.main.probe_mode)"
+	[ "$MODE" = device ] || MODE=switch
+	if [ "$ACCESS" = 1 ]; then
+		if ! command -v curl >/dev/null 2>&1; then
+			msg "access check needs curl (apk add curl); testing reachability only"; ACCESS=0
+		elif [ -z "$MAIN_ADDR" ]; then
+			msg "access check: no address on $WG_IFACE; testing reachability only"; ACCESS=0
+		elif [ "$MODE" = device ] && [ -z "$PROBE_ADDR" ]; then
+			msg "access check needs probe_address (the probe device's tunnel IP); testing reachability only"
+			ACCESS=0
+		fi
+	fi
+	if [ "$MODE" = device ]; then
 		probe_start || { msg "could not start the probe interface $PROBE_IF"; return 1; }
 	else
-		mode=switch
 		msg "testing on the main tunnel: internet pauses for a few seconds per relay"
 		PROBING=1
 	fi
 
-	while read -r ip key; do
-		total=$((total + 1))
-		# The active relay isn't probed (its /32 bypass route is in use); the main tunnel's
-		# handshake from before the test already says whether it works.
-		if [ "$ip" = "$SRV" ]; then
-			[ "$srv_ok" = 0 ]
-		elif [ "$mode" = device ]; then
-			probe "$ip" "$key"
-		else
-			apply "$ip" "$key" "$DEF_PORT" stage 2>/dev/null && verify "$PROBE_WAIT" 2>/dev/null
+	TESTED=""; used="$cc"
+	if ! test_relays "$cc"; then
+		msg "no usable relay in '$cc'"
+		if [ "$FALLBACK" = 1 ] && [ "$cc" != all ]; then
+			msg "fallback: looking for the fastest usable relay anywhere..."
+			used=all
+			test_relays all
 		fi
-		if [ $? -eq 0 ]; then
-			ok="$ok$ip $key
-"; n=$((n + 1)); msg "  ok    $ip"
-		else
-			msg "  fail  $ip"
-		fi
-	done <<-EOF
-	$LIST
-	EOF
+	fi
 	probe_stop
 
-	if [ "$n" -eq 0 ]; then
-		msg "no $cc relay is reachable from here; relay list left unchanged"
-		[ "$mode" = switch ] && restore_switch
+	if [ "$N" -eq 0 ]; then
+		msg "no relay is usable from here; relay list left unchanged"
+		[ "$MODE" = switch ] && restore_switch
 		return 1
 	fi
-	msg "ranking $n working relays by packet loss and latency (~${RANK_PINGS}s)..."
-	ok="$(rank "$ok")
+	msg "ranking $N working relays by packet loss and latency (~${RANK_PINGS}s)..."
+	OK="$(rank "$OK")
 "
-	if [ "$mode" = switch ]; then
+	if [ "$MODE" = switch ]; then
 		PROBING=0
 		uci -q revert lwo; uci -q revert network
 	fi
 	uci -q delete lwo.main.peer
-	printf '%s' "$ok" | while read -r ip key; do uci add_list lwo.main.peer="$ip $key"; done
+	printf '%s' "$OK" | while read -r ip key; do uci add_list lwo.main.peer="$ip $key"; done
+	# Keep the chosen country even after a fallback, so the next update tries it first again.
 	uci set lwo.main.country="$cc"
 	uci commit lwo
-	msg "kept $n of $total $cc relays, best first"
+	msg "kept $N of $TOTAL '$used' relays, best first"
 	# Go to the best-ranked relay (in switch mode the tunnel is on a test relay anyway).
-	target="$(printf '%s' "$ok" | head -n1 | cut -d' ' -f1)"
-	[ "$mode" = switch ] || [ "$target" != "$SRV" ] && "$0" use "$target"
-	[ "$mode" = switch ] && drop_test_routes "$target"
+	target="$(printf '%s' "$OK" | head -n1 | cut -d' ' -f1)"
+	[ "$MODE" = switch ] || [ "$target" != "$SRV" ] && "$0" use "$target"
+	[ "$MODE" = switch ] && drop_test_routes "$target"
 	return 0
 }
 
@@ -391,5 +551,5 @@ case "${1:-list}" in
 			"$0" failover
 		done
 		;;
-	*) msg "usage: lwo-switch {list | use <ip> | next | check | failover | update [cc] | countries | watch}"; exit 2 ;;
+	*) msg "usage: lwo-switch {list | use <ip> | next | check | failover | update [cc|region|all] | countries | watch}"; exit 2 ;;
 esac

@@ -366,6 +366,38 @@ The update replaces the whole relay list with that country's working relays. It 
 enabled and connected, and blocks Switch/Next/Failover while it runs. In **Pause internet** mode
 nothing is written to flash until the end, so a reboot mid-test comes back on your old relay.
 
+**Regions.** Instead of one country you can pick a whole region: `europe`, `north-america`,
+`south-america`, `asia`, `oceania`, `middle-east`, `africa`, or `all`. The LuCI list groups
+the countries by region. A region usually finds faster relays than one country: up to
+`region_per_country` relays (default 3) of each country are pinged at once over WAN, and only
+the best `max_relays` of those are tested and ranked as above.
+
+**Access check** (`access_check`, needs `curl`). Some relays connect but are useless: no data
+gets through, or sites block them. With this on, every relay that connects also gets real
+traffic sent through it. Data must pass (`access_data_url`, 3 tries), and none of the
+`access_url` sites may answer 403, 429 or nothing, or show a page matching
+`access_block_regex` ("you have been blocked", "not available in your country", Google's
+"unusual traffic", ...). A Cloudflare browser challenge (`cf-mitigated: challenge`) is not
+counted as a block. The defaults are claude.ai, api.anthropic.com, Gemini, Google search and
+cloudflare.com. Relays that fail are dropped from the list. The traffic goes out of the tunnel
+through a private routing table that only applies to the tunnel's own address, so nothing else
+on the router changes. In **Second device** mode set `probe_address` to that device's tunnel IP
+(the `Address` line of its Mullvad WireGuard config).
+
+**Fall back to any country** (`fallback_any`). If no relay of the chosen country or region
+works (or passes the access check), the update looks for the fastest working relay anywhere
+(like `all`). The chosen country is kept, so the next update tries it first again. With auto
+failover on, a failover that finds every listed relay down also runs an update, at most once
+every 15 minutes.
+
+```sh
+uci set lwo.main.country='europe'
+uci set lwo.main.access_check='1'      # apk add curl
+uci set lwo.main.fallback_any='1'
+uci commit lwo
+lwo-switch update
+```
+
 **No leak while switching.** `lwo-switch` swaps the WireGuard peer and the relay-bypass route
 live, without taking `wg_mullvad` down, so the tunnel routes stay in place. During the switch,
 traffic goes into the tunnel and is dropped until the new relay handshakes. It never falls back
