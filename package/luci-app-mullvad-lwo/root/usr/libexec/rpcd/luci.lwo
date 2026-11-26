@@ -81,9 +81,9 @@ method_lwo_switch() {
 method_countries() {
 	local code region name list=""
 	# Downloading the relay list can take longer than LuCI waits for an rpc call, which left
-	# the country list empty. Without a cached list, fetch it in the background (one fetch at a
-	# time) and return no countries; the next page load lists them.
-	if [ -s /tmp/lwo-relays.json ]; then
+	# the country list empty. Without a cached or saved list, fetch it in the background (one
+	# fetch at a time) and return no countries; the next page load lists them.
+	if [ -s /tmp/lwo-relays.json ] || [ -s /etc/lwo/relays.json.gz ]; then
 		list="$(/usr/sbin/lwo-switch countries 2>/dev/null)"
 	elif ! kill -0 "$(cat /var/run/lwo-fetch.pid 2>/dev/null)" 2>/dev/null; then
 		start-stop-daemon -S -b -m -p /var/run/lwo-fetch.pid \

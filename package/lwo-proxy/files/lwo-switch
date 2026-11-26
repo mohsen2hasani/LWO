@@ -164,6 +164,7 @@ failover() {
 # --- relay list from the Mullvad API + reachability probe ---------------------
 
 CACHE=/tmp/lwo-relays.json
+SAVED=/etc/lwo/relays.json.gz
 PROBE_IF=wg_probe
 config_get PROBE_WAIT main probe_timeout 6
 config_get MAX_RELAYS main max_relays 20
@@ -196,17 +197,29 @@ ACC_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) C
 
 fetch_relays() {
 	# grep: never cache a captive-portal page or error body as the relay list
-	uclient-fetch -q -T 30 -O "$CACHE.tmp" https://api.mullvad.net/app/v1/relays &&
-		grep -q '"wireguard"' "$CACHE.tmp" && mv "$CACHE.tmp" "$CACHE" && return 0
+	if uclient-fetch -q -T 30 -O "$CACHE.tmp" https://api.mullvad.net/app/v1/relays &&
+		grep -q '"wireguard"' "$CACHE.tmp" && mv "$CACHE.tmp" "$CACHE"; then
+		# Keep a copy on flash: after a reboot the API may be unreachable (censored or slow
+		# networks). Written only when the list changed.
+		zcat "$SAVED" 2>/dev/null | cmp -s - "$CACHE" || {
+			mkdir -p "${SAVED%/*}" && gzip -c < "$CACHE" > "$SAVED.tmp" && mv "$SAVED.tmp" "$SAVED"
+		}
+		return 0
+	fi
 	rm -f "$CACHE.tmp"
 	msg "could not download the relay list from api.mullvad.net"
 	return 1
 }
 
+restore_relays() { # the last downloaded list, saved on flash by fetch_relays
+	[ -s "$SAVED" ] && zcat "$SAVED" > "$CACHE.tmp" && mv "$CACHE.tmp" "$CACHE" &&
+		msg "using the relay list saved on $(date -r "$SAVED" +%Y-%m-%d)"
+}
+
 # A target is a country code ('nl'), a region ('europe', 'asia', ...) or 'all'.
 # The Mullvad API has no continents, so the region of each country is listed here.
 relays() { # countries -> "cc region Name" lines | <target> -> "IP KEY" lines of active LWO relays
-	[ -s "$CACHE" ] || fetch_relays || return 1
+	[ -s "$CACHE" ] || restore_relays || fetch_relays || return 1
 	F="$CACHE" C="$1" P="$PER_COUNTRY" ucode -e '
 let REG = {
 	"europe": "ad al at ba be bg by ch cy cz de dk ee es fi fr gb gr hr hu ie is it li lt lu lv md me mk mt nl no pl pt ro rs se si sk tr ua",
@@ -459,7 +472,7 @@ update() { # [country | region | all] -> replace lwo.main.peer with the working 
 	trap 'exit 1' INT TERM
 
 	msg "updating relays for '$cc'..."
-	fetch_relays || { [ -s "$CACHE" ] && msg "using the cached relay list"; } || return 1
+	fetch_relays || { [ -s "$CACHE" ] && msg "using the cached relay list"; } || restore_relays || return 1
 	SRV="$(uci -q get lwo.main.server)"
 	WAN_VIA="$(wan_via)"
 	SRV_KEY="$(uci -q get lwo.main.server_pubkey)"
