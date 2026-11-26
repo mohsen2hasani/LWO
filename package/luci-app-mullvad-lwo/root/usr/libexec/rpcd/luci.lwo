@@ -79,7 +79,16 @@ method_lwo_switch() {
 }
 
 method_countries() {
-	local code region name
+	local code region name list=""
+	# Downloading the relay list can take longer than LuCI waits for an rpc call, which left
+	# the country list empty. Without a cached list, fetch it in the background (one fetch at a
+	# time) and return no countries; the next page load lists them.
+	if [ -s /tmp/lwo-relays.json ]; then
+		list="$(/usr/sbin/lwo-switch countries 2>/dev/null)"
+	elif ! kill -0 "$(cat /var/run/lwo-fetch.pid 2>/dev/null)" 2>/dev/null; then
+		start-stop-daemon -S -b -m -p /var/run/lwo-fetch.pid \
+			-x /usr/sbin/lwo-switch -- countries >/dev/null 2>&1
+	fi
 	json_init
 	json_add_array countries
 	while read -r code region name; do
@@ -90,7 +99,7 @@ method_countries() {
 		json_add_string name "$name"
 		json_close_object
 	done <<-EOF
-	$(/usr/sbin/lwo-switch countries 2>/dev/null)
+	$list
 	EOF
 	json_close_array
 	json_dump
