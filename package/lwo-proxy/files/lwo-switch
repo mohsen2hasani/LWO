@@ -196,9 +196,14 @@ ACC_TABLE=51822
 ACC_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 
 fetch_relays() {
+	# Ask for gzip: ~100 KB instead of ~700 KB, which matters on slow or throttled links.
+	# zcat fails on a plain (uncompressed) reply, which is then kept as is.
 	# grep: never cache a captive-portal page or error body as the relay list
-	if uclient-fetch -q -T 30 -O "$CACHE.tmp" https://api.mullvad.net/app/v1/relays &&
+	if uclient-fetch -q -T 30 --header='Accept-Encoding: gzip' -O "$CACHE.gz" \
+		https://api.mullvad.net/app/v1/relays &&
+		{ zcat "$CACHE.gz" > "$CACHE.tmp" 2>/dev/null || mv "$CACHE.gz" "$CACHE.tmp"; } &&
 		grep -q '"wireguard"' "$CACHE.tmp" && mv "$CACHE.tmp" "$CACHE"; then
+		rm -f "$CACHE.gz"
 		# Keep a copy on flash: after a reboot the API may be unreachable (censored or slow
 		# networks). Written only when the list changed.
 		zcat "$SAVED" 2>/dev/null | cmp -s - "$CACHE" || {
@@ -206,7 +211,7 @@ fetch_relays() {
 		}
 		return 0
 	fi
-	rm -f "$CACHE.tmp"
+	rm -f "$CACHE.tmp" "$CACHE.gz"
 	msg "could not download the relay list from api.mullvad.net"
 	return 1
 }
