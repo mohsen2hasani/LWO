@@ -376,12 +376,18 @@ the best `max_relays` of those are tested and ranked as above.
 
 **Access check** (`access_check`, needs `curl`). Some relays connect but are useless: no data
 gets through, or sites block them. With this on, every relay that connects also gets real
-traffic sent through it. Data must pass (`access_data_url`, 3 tries), and none of the
-`access_url` sites may answer 403, 429 or nothing, or show a page matching
-`access_block_regex` ("you have been blocked", "not available in your country", Google's
-"unusual traffic", ...). A Cloudflare browser challenge (`cf-mitigated: challenge`) is not
-counted as a block. The defaults are claude.ai, api.anthropic.com, Gemini, Google search and
-cloudflare.com. Relays that fail are dropped from the list. The traffic goes out of the tunnel
+traffic sent through it. Data must pass (`access_data_url`, 2 tries). Optionally, list sites
+in `access_url` (none by default, see `lwo.config` for examples): none of them may answer 403,
+429 or nothing, or show a page matching `access_block_regex` ("you have been blocked", "not
+available in your country", Google's "unusual traffic", ...). A Cloudflare browser challenge
+(`cf-mitigated: challenge`) is not counted as a block. The check stops at the first failure.
+Pick sites with care: Google search, for one, often answers VPN exits with 429, which drops
+relays that work fine. Relays that fail are dropped from the list. In **Pause internet** mode
+the internet is down while a relay is checked: up to about 17 s for a relay that passes no data,
+plus up to 8 s per site (curl waits at most 8 s per request).
+If a transparent proxy on the router (Passwall, OpenClash, ...) redirects the router's own TCP
+traffic, the check's requests never reach the tunnel and every relay fails: exempt the router's
+traffic from the proxy, or leave the check off. The traffic goes out of the tunnel
 through a private routing table that only applies to the tunnel's own address, so nothing else
 on the router changes. In **Second device** mode set `probe_address` to that device's tunnel IP
 (the `Address` line of its Mullvad WireGuard config).
@@ -390,11 +396,13 @@ on the router changes. In **Second device** mode set `probe_address` to that dev
 works (or passes the access check), the update looks for the fastest working relay anywhere
 (like `all`). The chosen country is kept, so the next update tries it first again. With auto
 failover on, a failover that finds every listed relay down also runs an update, at most once
-every 15 minutes.
+every 15 minutes. The internet is already down at that point, so in **Pause internet** mode
+that update doesn't cause an extra outage, only delays the next failover attempt.
 
 ```sh
 uci set lwo.main.country='europe'
 uci set lwo.main.access_check='1'      # apk add curl
+uci add_list lwo.main.access_url='https://claude.ai/login'   # optional
 uci set lwo.main.fallback_any='1'
 uci commit lwo
 lwo-switch update

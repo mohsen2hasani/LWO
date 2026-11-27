@@ -191,13 +191,15 @@ return view.extend({
 
 		o = s.option(form.Flag, 'access_check', _('Access check'),
 			_('After a relay connects, send real traffic through it: data must pass, and the sites ' +
-			  'below must not answer 403, 429, nothing, or a "blocked" / "not available in your ' +
-			  'country" page. A Cloudflare browser check is not counted as a block. Relays that ' +
-			  'fail are dropped. Needs <code>curl</code>.'));
+			  'below (if any) must not answer 403, 429, nothing, or a "blocked" / "not available ' +
+			  'in your country" page. A Cloudflare browser check is not counted as a block. Relays ' +
+			  'that fail are dropped. Needs <code>curl</code>. With <em>Pause internet</em> the ' +
+			  'internet stays down while a relay is checked: up to about 17 s for a relay that ' +
+			  'passes no data, plus up to 8 s per site.'));
 
 		o = s.option(form.DynamicList, 'access_url', _('Access check sites'),
-			_('Leave empty for the defaults: claude.ai, api.anthropic.com, Gemini, Google search ' +
-			  'and cloudflare.com.'));
+			_('Optional. Empty: only check that data passes. Sites such as Google search often ' +
+			  'answer VPN exits with 429 or "unusual traffic", which drops relays that work fine.'));
 		o.placeholder = 'https://claude.ai/login';
 		o.depends('access_check', '1');
 

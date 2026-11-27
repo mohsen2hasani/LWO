@@ -185,14 +185,11 @@ config_get ACC_BLOCK main access_block_regex \
 ACC_URLS=""
 _acc() { ACC_URLS="${ACC_URLS}$1
 "; }
+# No sites by default: the check then only proves that data passes. See lwo.config for examples.
 config_list_foreach main access_url _acc
-[ -n "$ACC_URLS" ] || ACC_URLS="https://claude.ai/login
-https://api.anthropic.com/v1/models
-https://gemini.google.com/app
-https://www.google.com/search?q=weather
-https://www.cloudflare.com/
-"
 ACC_TABLE=51822
+# Below the main table (32766), so the rule wins even without curl's device binding.
+ACC_PRIO=31822
 ACC_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 
 fetch_relays() {
@@ -238,7 +235,7 @@ let REG = {
 let region = {};
 for (let rg in REG) for (let c in split(REG[rg], " ")) region[c] = rg;
 let d = json(require("fs").readfile(getenv("F")));
-let want = getenv("C"), cap = int(getenv("P") || "0"), seen = {}, n = {};
+let want = getenv("C"), cap = int(getenv("P") || "0"), seen = {}, pool = {};
 for (let r in d.wireguard.relays) {
 	if (!r.active || !r.features || !exists(r.features, "lwo")) continue;
 	let cc = split(r.location, "-")[0], rg = region[cc] || "other";
@@ -247,12 +244,25 @@ for (let r in d.wireguard.relays) {
 		continue;
 	}
 	if (want != cc && want != rg && want != "all") continue;
-	// regions and "all": a few relays per country, so every country gets a fair chance
+	// regions and "all": a few random relays per country (spread over its cities), so every
+	// country gets a fair chance
 	if (want != cc && cap > 0) {
-		n[cc] = (n[cc] || 0) + 1;
-		if (n[cc] > cap) continue;
+		if (!pool[cc]) pool[cc] = [];
+		push(pool[cc], r);
+		continue;
 	}
 	print(r.ipv4_addr_in, " ", r.public_key, "\n");
+}
+let m = require("math");
+m.srand(time());
+for (let cc in keys(pool)) {
+	let a = pool[cc];
+	for (let i = length(a) - 1; i > 0; i--) {
+		let j = m.rand() % (i + 1), t = a[i];
+		a[i] = a[j]; a[j] = t;
+	}
+	for (let i = 0; i < cap && i < length(a); i++)
+		print(a[i].ipv4_addr_in, " ", a[i].public_key, "\n");
 }
 for (let cc in sort(keys(seen))) print(cc, " ", seen[cc], "\n");
 '
@@ -283,7 +293,7 @@ probe_start() {
 # --- access check: does real traffic pass, and do common sites answer without a block? ---
 
 access_cleanup() {
-	ip rule del priority "$ACC_TABLE" 2>/dev/null
+	ip rule del priority "$ACC_PRIO" 2>/dev/null
 	ip route flush table "$ACC_TABLE" 2>/dev/null
 	rm -f /tmp/lwo-acc.h /tmp/lwo-acc.b
 }
@@ -291,24 +301,25 @@ access_cleanup() {
 acc_curl() { # iface curl-args... (traffic is bound to the tunnel interface)
 	local ifc="$1"; shift
 	# -4: the tunnel has no IPv6 address, don't spend the timeout trying it
-	curl -4 -s -m 15 --interface "$ifc" -A "$ACC_UA" -H 'Accept-Language: en-US' "$@"
+	# -m 8: in switch mode the internet is down while a relay is checked
+	curl -4 -s -m 8 --interface "$ifc" -A "$ACC_UA" -H 'Accept-Language: en-US' "$@"
 }
 
 # Route traffic from the tunnel's own address out of that tunnel (a private table, so the
-# rest of the router is untouched), then: data must pass (3 tries), and no site in
+# rest of the router is untouched), then: data must pass (2 tries), and no site in
 # access_url may answer 403 (a Cloudflare browser challenge is not a block), 429, nothing,
-# or a page matching access_block_regex.
+# or a page matching access_block_regex. Stops at the first failure.
 access_ok() { # iface src_ip
 	local ifc="$1" src="$2" i c h u r res="" bad=0
 	access_cleanup
 	ip route replace default dev "$ifc" table "$ACC_TABLE" &&
-		ip rule add from "$src" lookup "$ACC_TABLE" priority "$ACC_TABLE" || return 1
+		ip rule add from "$src" lookup "$ACC_TABLE" priority "$ACC_PRIO" || return 1
 	# Any HTTP answer proves data passes (sites rate-limit scripts, e.g. Yahoo answers 429).
 	c=""
-	for i in 1 2 3; do
+	for i in 1 2; do
 		c="$(acc_curl "$ifc" -o /dev/null -w '%{http_code}' "$ACC_DATA")"
 		case "$c" in [1-5][0-9][0-9]) break ;; esac
-		c=""; sleep 2
+		c=""; sleep 1
 	done
 	if [ -z "$c" ]; then
 		msg "    no data passes through the tunnel"
@@ -325,11 +336,12 @@ access_ok() { # iface src_ip
 		{ grep -qiE "$ACC_BLOCK" /tmp/lwo-acc.b 2>/dev/null || echo "${h#*|}" | grep -qiE "$ACC_BLOCK"; } &&
 			{ r="$r-blocked"; bad=1; }
 		res="$res $(echo "$u" | sed 's|^[a-z]*://||; s|[/?].*||')=$r"
+		[ "$bad" = 0 ] || break
 	done <<-EOF
 	$ACC_URLS
 	EOF
 	access_cleanup
-	msg "    access:$res"
+	[ -n "$res" ] && msg "    access:$res"
 	return $bad
 }
 
@@ -434,6 +446,7 @@ test_relays() { # target
 	# At most max_relays, current relay first.
 	LIST="$(printf '%s\n' "$all" | awk -v s="$SRV" '$1 == s { print; next } { r[++n] = $0 }
 		END { for (i = 1; i <= n; i++) print r[i] }' | head -n "$MAX_RELAYS")"
+	FIRST=0; [ -z "$TESTED" ] && FIRST=1
 	TESTED="$TESTED$LIST
 "
 
@@ -441,8 +454,10 @@ test_relays() { # target
 		[ -n "$ip" ] || continue
 		TOTAL=$((TOTAL + 1))
 		# The active relay isn't probed (its /32 bypass route is in use); the main tunnel's
-		# handshake from before the test already says whether it works.
-		if [ "$ip" = "$SRV" ]; then
+		# handshake from before the test already says whether it works. That holds while the
+		# main tunnel is still on it: always in device mode, but in switch mode only in the
+		# first pass. In a later (fallback) pass it is tested like any other relay.
+		if [ "$ip" = "$SRV" ] && { [ "$MODE" = device ] || [ "$FIRST" = 1 ]; }; then
 			[ "$SRV_OK" = 0 ] && { [ "$ACCESS" != 1 ] || access_ok "$WG_IFACE" "$MAIN_ADDR"; }
 		elif [ "$MODE" = device ]; then
 			probe "$ip" "$key"
