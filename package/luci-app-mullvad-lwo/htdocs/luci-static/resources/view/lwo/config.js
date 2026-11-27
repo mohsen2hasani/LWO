@@ -221,7 +221,10 @@ return view.extend({
 
 		o = s.option(form.Value, 'probe_address', _('Probe tunnel address'),
 			_('The <code>Address</code> of that second device in its Mullvad WireGuard config ' +
-			  '(e.g. <code>10.66.12.34</code>). Needed only for the access check.'));
+			  '(e.g. <code>10.66.12.34</code>). Needed only for the access check. Mullvad may ' +
+			  'give that device a different exit IP than your main one on the same relay, so a ' +
+			  'site can block one and not the other: the check is only exact in ' +
+			  '<em>Pause internet</em> mode.'));
 		o.datatype = 'ip4addr';
 		o.depends({ probe_mode: 'device', access_check: '1' });
 

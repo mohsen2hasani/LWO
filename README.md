@@ -392,7 +392,11 @@ temporary nftables table `lwo_acc`, removed afterwards). Don't use `www.yahoo.co
 `access_block_regex`. `https://search.yahoo.com/` works. The traffic goes out of the tunnel
 through a private routing table that only applies to the tunnel's own address, so nothing else
 on the router changes. In **Second device** mode set `probe_address` to that device's tunnel IP
-(the `Address` line of its Mullvad WireGuard config).
+(the `Address` line of its Mullvad WireGuard config). There the check runs from the second
+device's exit IP, and Mullvad can give your main device a different exit IP on the same relay
+(seen on one relay: 403 for the main device, 200 for the second). Sites that judge by IP
+reputation can block one and not the other, so the result is only exact in **Pause internet**
+mode.
 
 **Fall back to any country** (`fallback_any`). If no relay of the chosen country or region
 works (or passes the access check), the update looks for the fastest working relay anywhere
