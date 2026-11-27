@@ -330,7 +330,7 @@ access_ok() { # iface src_ip
 	for i in 1 2; do
 		c="$(acc_curl "$ifc" -o /dev/null -w '%{http_code}' "$ACC_DATA")"
 		case "$c" in [1-5][0-9][0-9]) break ;; esac
-		c=""; sleep 1
+		c=""; [ "$i" = 2 ] || sleep 1
 	done
 	if [ -z "$c" ]; then
 		msg "    no data passes through the tunnel"
