@@ -14,3 +14,4 @@
 /etc/hotplug.d/iface/99-lwo
 /etc/apk/keys/lwo-feed.pem
 /etc/apk/repositories.d/lwo.list
+/etc/lwo/relays.json.gz

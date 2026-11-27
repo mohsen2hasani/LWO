@@ -344,7 +344,9 @@ block some relays or ports. If the active relay didn't pass, it switches to the 
 did. The working relays are then **ranked by packet loss and latency** over plain WAN (your
 ISP's path is usually what limits speed) and the list is saved best-first. The update switches
 to the best one, and failover and **Next relay** follow that order. Choose how relays are
-tested with **Relay test mode** (`lwo.main.probe_mode`):
+tested with **Relay test mode** (`lwo.main.probe_mode`) below. Each downloaded relay list is
+also saved to `/etc/lwo/relays.json.gz` (kept across reboots and sysupgrade) and used when the
+Mullvad API can't be reached, e.g. right after a reboot on a network that blocks or throttles it:
 
 - **Pause internet** (`switch`, default): no setup. The main tunnel moves to each relay for a
   few seconds, then reconnects to the best one. Traffic is dropped while it tests, never leaked.
@@ -365,6 +367,52 @@ The update replaces the whole relay list with that country's working relays. It 
 `max_relays` (default 20, a random pick, your current relay always included), needs LWO to be
 enabled and connected, and blocks Switch/Next/Failover while it runs. In **Pause internet** mode
 nothing is written to flash until the end, so a reboot mid-test comes back on your old relay.
+
+**Regions.** Instead of one country you can pick a whole region: `europe`, `north-america`,
+`south-america`, `asia`, `oceania`, `middle-east`, `africa`, or `all`. The LuCI list groups
+the countries by region. A region usually finds faster relays than one country: up to
+`region_per_country` relays (default 3) of each country are pinged at once over WAN, and only
+the best `max_relays` of those are tested and ranked as above.
+
+**Access check** (`access_check`, needs `curl`). Some relays connect but are useless: no data
+gets through, or sites block them. With this on, every relay that connects also gets real
+traffic sent through it. Data must pass (`access_data_url`, 2 tries). Optionally, list sites
+in `access_url` (none by default, see `lwo.config` for examples): none of them may answer 403,
+429 or nothing, or show a page matching `access_block_regex` ("you have been blocked", "not
+available in your country", Google's "unusual traffic", ...). A Cloudflare browser challenge
+(`cf-mitigated: challenge`) is not counted as a block. The check stops at the first failure.
+Pick sites with care: Google search, for one, often answers VPN exits with 429, which drops
+relays that work fine. Relays that fail are dropped from the list. In **Pause internet** mode
+the internet is down while a relay is checked: up to about 17 s for a relay that passes no data,
+plus up to 8 s per site (curl waits at most 8 s per request).
+Transparent proxies on the router (PassWall and similar) redirect the router's own TCP unless
+its mark has `0xff` set, so while it runs the check sets that mark on its own traffic only (a
+temporary nftables table `lwo_acc`, removed afterwards). Don't use `www.yahoo.com` as an
+`access_url`: its homepage contains "not available in your region", which matches
+`access_block_regex`. `https://search.yahoo.com/` works. The traffic goes out of the tunnel
+through a private routing table that only applies to the tunnel's own address, so nothing else
+on the router changes. In **Second device** mode set `probe_address` to that device's tunnel IP
+(the `Address` line of its Mullvad WireGuard config). There the check runs from the second
+device's exit IP, and Mullvad can give your main device a different exit IP on the same relay
+(seen on one relay: 403 for the main device, 200 for the second). Sites that judge by IP
+reputation can block one and not the other, so the result is only exact in **Pause internet**
+mode.
+
+**Fall back to any country** (`fallback_any`). If no relay of the chosen country or region
+works (or passes the access check), the update looks for the fastest working relay anywhere
+(like `all`). The chosen country is kept, so the next update tries it first again. With auto
+failover on, a failover that finds every listed relay down also runs an update, at most once
+every 15 minutes. The internet is already down at that point, so in **Pause internet** mode
+that update doesn't cause an extra outage, only delays the next failover attempt.
+
+```sh
+uci set lwo.main.country='europe'
+uci set lwo.main.access_check='1'      # apk add curl
+uci add_list lwo.main.access_url='https://claude.ai/login'   # optional
+uci set lwo.main.fallback_any='1'
+uci commit lwo
+lwo-switch update
+```
 
 **No leak while switching.** `lwo-switch` swaps the WireGuard peer and the relay-bypass route
 live, without taking `wg_mullvad` down, so the tunnel routes stay in place. During the switch,
