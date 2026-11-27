@@ -295,6 +295,7 @@ probe_start() {
 access_cleanup() {
 	ip rule del priority "$ACC_PRIO" 2>/dev/null
 	ip route flush table "$ACC_TABLE" 2>/dev/null
+	nft delete table inet lwo_acc 2>/dev/null
 	rm -f /tmp/lwo-acc.h /tmp/lwo-acc.b
 }
 
@@ -314,6 +315,16 @@ access_ok() { # iface src_ip
 	access_cleanup
 	ip route replace default dev "$ifc" table "$ACC_TABLE" &&
 		ip rule add from "$src" lookup "$ACC_TABLE" priority "$ACC_PRIO" || return 1
+	# PassWall (and similar) redirect the router's own TCP into their proxy unless
+	# mark & 0xff == 0xff; without this every access check answers 000 behind PassWall.
+	nft -f - 2>/dev/null <<-NFT
+	table inet lwo_acc {
+		chain out {
+			type route hook output priority mangle; policy accept;
+			ip saddr $src meta mark set mark or 0xff
+		}
+	}
+	NFT
 	# Any HTTP answer proves data passes (sites rate-limit scripts, e.g. Yahoo answers 429).
 	c=""
 	for i in 1 2; do
@@ -495,6 +506,8 @@ update() { # [country | region | all] -> replace lwo.main.peer with the working 
 	fetch_relays || { [ -s "$CACHE" ] && msg "using the cached relay list"; } || restore_relays || return 1
 	SRV="$(uci -q get lwo.main.server)"
 	WAN_VIA="$(wan_via)"
+	# Without it relays can't be probed or ranked over WAN (setups from before 1.2.1 may lack it).
+	[ -n "$WAN_VIA" ] || msg "no bypass route (network.$BYPASS with interface + gateway); relays can't be probed over WAN"
 	SRV_KEY="$(uci -q get lwo.main.server_pubkey)"
 	SRV_PORT="$(uci -q get lwo.main.server_port)"
 	SRV_OK=1; [ "$(handshake_age)" -lt "$HS_MAX" ] && SRV_OK=0

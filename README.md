@@ -385,9 +385,11 @@ Pick sites with care: Google search, for one, often answers VPN exits with 429, 
 relays that work fine. Relays that fail are dropped from the list. In **Pause internet** mode
 the internet is down while a relay is checked: up to about 17 s for a relay that passes no data,
 plus up to 8 s per site (curl waits at most 8 s per request).
-If a transparent proxy on the router (Passwall, OpenClash, ...) redirects the router's own TCP
-traffic, the check's requests never reach the tunnel and every relay fails: exempt the router's
-traffic from the proxy, or leave the check off. The traffic goes out of the tunnel
+Transparent proxies on the router (PassWall and similar) redirect the router's own TCP unless
+its mark has `0xff` set, so while it runs the check sets that mark on its own traffic only (a
+temporary nftables table `lwo_acc`, removed afterwards). Don't use `www.yahoo.com` as an
+`access_url`: its homepage contains "not available in your region", which matches
+`access_block_regex`. `https://search.yahoo.com/` works. The traffic goes out of the tunnel
 through a private routing table that only applies to the tunnel's own address, so nothing else
 on the router changes. In **Second device** mode set `probe_address` to that device's tunnel IP
 (the `Address` line of its Mullvad WireGuard config).
